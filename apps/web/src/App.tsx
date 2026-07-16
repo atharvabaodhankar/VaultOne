@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { useSignMessage } from '@privy-io/react-auth'
 import { 
   useWallet, 
   useTransaction, 
@@ -59,6 +60,7 @@ interface Secret {
 
 export default function App() {
   const wallet = useWallet()
+  const { signMessage } = useSignMessage()
   // State
   const [activeTab, setActiveTab] = useState<'dashboard' | 'activity' | 'settings'>('dashboard')
   const [selectedVaultId, setSelectedVaultId] = useState<`0x${string}` | null>(null)
@@ -227,14 +229,13 @@ export default function App() {
 
   // Derive Master Key via signing a fixed message
   const handleUnlockVault = async () => {
-    if (!wallet.smartAccountClient) return
     setIsUnlocking(true)
     try {
       const msg = "Authenticate with VaultOne to decrypt your master key"
-      const sig = await wallet.smartAccountClient.signMessage({
+      const result = await signMessage({
         message: msg
       })
-      const derivedKey = keccak256(sig)
+      const derivedKey = keccak256(result.signature as `0x${string}`)
       setMasterKey(derivedKey)
     } catch (err) {
       console.error("Unlock failed:", err)
