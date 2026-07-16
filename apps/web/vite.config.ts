@@ -8,6 +8,7 @@ export default defineConfig({
     react(),
     tailwindcss()
   ],
+  envDir: '../../',
   define: {
     global: 'globalThis', // required for viem
   },
