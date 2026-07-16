@@ -43,7 +43,7 @@ export async function encryptText(plaintext: string, keyHex: string): Promise<{ 
 
   const cryptoKey = await window.crypto.subtle.importKey(
     "raw",
-    keyBuf,
+    keyBuf as any,
     "AES-GCM",
     false,
     ["encrypt"]
@@ -53,7 +53,7 @@ export async function encryptText(plaintext: string, keyHex: string): Promise<{ 
   const encrypted = await window.crypto.subtle.encrypt(
     {
       name: "AES-GCM",
-      iv: iv,
+      iv: iv as any,
     },
     cryptoKey,
     enc.encode(plaintext)
@@ -75,7 +75,7 @@ export async function decryptText(ciphertextHex: string, ivHex: string, keyHex: 
 
   const cryptoKey = await window.crypto.subtle.importKey(
     "raw",
-    keyBuf,
+    keyBuf as any,
     "AES-GCM",
     false,
     ["decrypt"]
@@ -84,10 +84,10 @@ export async function decryptText(ciphertextHex: string, ivHex: string, keyHex: 
   const decrypted = await window.crypto.subtle.decrypt(
     {
       name: "AES-GCM",
-      iv: ivBuf,
+      iv: ivBuf as any,
     },
     cryptoKey,
-    cipherBuf
+    cipherBuf as any
   );
 
   const dec = new TextDecoder();
