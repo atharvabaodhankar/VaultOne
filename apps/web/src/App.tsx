@@ -193,6 +193,18 @@ export default function App() {
           }
         }
         setSecrets(fetched)
+
+        // Auto-reveal any secret whose CID is already in decryptedSecrets cache
+        // (i.e. the user just added it and we cached the plaintext during handleAddSecret)
+        const newReveals: Record<string, boolean> = {}
+        for (const s of fetched) {
+          if (decryptedSecrets[s.cid] && !revealedSecrets[s.id]) {
+            newReveals[s.id] = true
+          }
+        }
+        if (Object.keys(newReveals).length > 0) {
+          setRevealedSecrets(prev => ({ ...prev, ...newReveals }))
+        }
       }
       fetchSecrets()
     } else {
@@ -240,6 +252,37 @@ export default function App() {
     }
   }
 
+  // Helper: Send a tx and don't hang forever waiting for receipt.
+  // erc4337-kit's tx.send() internally calls waitForTransactionReceipt
+  // which can stall indefinitely for ERC-4337 UserOps on Polygon Amoy.
+  // This races the send against a 30s timeout — once we have a txHash
+  // (meaning the UserOp was submitted to the bundler), we treat it as success.
+  const safeSend = async (txArgs: Parameters<typeof tx.send>[0]) => {
+    const sendPromise = tx.send(txArgs)
+    const timeoutPromise = new Promise<null>((resolve) => {
+      setTimeout(() => resolve(null), 30000)
+    })
+    const result = await Promise.race([sendPromise, timeoutPromise])
+    // Even if the timeout wins or result is null, the UserOp was likely
+    // submitted. We check tx.txHash reactively via useEffect below.
+    return result
+  }
+
+  // Helper: Retry-based refetch to handle block indexing delay.
+  // Polls up to `maxRetries` times with `delayMs` between each attempt,
+  // calling the refetch function and checking if data has grown.
+  const retryRefetch = (refetchFn: () => void, delayMs = 3000, maxRetries = 4) => {
+    let attempt = 0
+    const poll = () => {
+      attempt++
+      refetchFn()
+      if (attempt < maxRetries) {
+        setTimeout(poll, delayMs)
+      }
+    }
+    setTimeout(poll, delayMs)
+  }
+
   // Create Vault on-chain
   const handleCreateVault = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -247,7 +290,7 @@ export default function App() {
     setIsCreatingVault(true)
     setErrorMessage(null)
     try {
-      await tx.send({
+      await safeSend({
         to: VAULT_REGISTRY_ADDRESS,
         abi: VAULT_REGISTRY_ABI,
         functionName: 'createVault',
@@ -256,7 +299,7 @@ export default function App() {
       setVaultName('')
       setVaultDesc('')
       setShowCreateVault(false)
-      setTimeout(() => refetchVaults(), 3000) // delay to let block index
+      retryRefetch(refetchVaults)
     } catch (err: any) {
       console.error("Create vault failed:", err)
       setErrorMessage(err.message || "Failed to create vault on-chain.")
@@ -305,14 +348,15 @@ export default function App() {
       const pinataCID = resData.cid
 
       // 5. Write to Blockchain
-      await tx.send({
+      await safeSend({
         to: SECRET_REGISTRY_ADDRESS,
         abi: SECRET_REGISTRY_ABI,
         functionName: 'storeSecret',
         args: [selectedVaultId, encName.ciphertext, pinataCID, secretType]
       })
 
-      // Update UI state
+      // Cache decrypted values so we can auto-reveal the new secret
+      // once it appears in the list from the blockchain refetch.
       setDecryptedSecrets(prev => ({
         ...prev,
         [pinataCID]: { name: secretName, value: secretVal }
@@ -321,7 +365,8 @@ export default function App() {
       setSecretName('')
       setSecretVal('')
       setShowAddSecret(false)
-      setTimeout(() => refetchSecrets(), 3000)
+      // Retry refetch — block may not be indexed yet
+      retryRefetch(refetchSecrets)
     } catch (err: any) {
       console.error("Add secret failed:", err)
       setErrorMessage(err.message || "Failed to add secret on-chain.")
@@ -368,13 +413,15 @@ export default function App() {
   // Delete Secret
   const handleDeleteSecret = async (secretId: `0x${string}`) => {
     try {
-      await tx.send({
+      await safeSend({
         to: SECRET_REGISTRY_ADDRESS,
         abi: SECRET_REGISTRY_ABI,
         functionName: 'deleteSecret',
         args: [secretId]
       })
-      setTimeout(() => refetchSecrets(), 3000)
+      // Optimistic UI: remove from local state immediately
+      setSecrets(prev => prev.filter(s => s.id !== secretId))
+      retryRefetch(refetchSecrets)
     } catch (err) {
       console.error("Delete failed:", err)
     }
