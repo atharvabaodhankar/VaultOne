@@ -1,0 +1,21 @@
+# Dependency directories
+node_modules/
+
+# Local env files
+.env
+.env.local
+.env.*.local
+
+# Hardhat/Truffle build artifacts
+artifacts/
+cache/
+
+# IDE files
+.vscode/
+.idea/
+.gemini/
+
+# Build outputs
+dist/
+build/
+out/
