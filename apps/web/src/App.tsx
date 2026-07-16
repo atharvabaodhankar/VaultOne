@@ -34,7 +34,7 @@ import {
   PERMISSION_MANAGER_ABI
 } from './utils/contracts'
 import { generateAESKey, encryptText, decryptText } from './utils/crypto'
-import { keccak256, toHex } from 'viem'
+import { keccak256 } from 'viem'
 
 // Types
 interface Vault {
@@ -280,7 +280,7 @@ export default function App() {
       // 3. Encrypt the secret's AES key with user's Master Key
       const encKeyObj = await encryptText(itemKey, masterKey)
 
-      // 4. Mock decentralized Storacha Upload (combining cipher, IVs, and wrapped key)
+      // 4. Secure Cloudflare Proxy Upload to Pinata
       const payload = {
         ciphertext: encValue.ciphertext,
         iv: encValue.iv,
@@ -289,24 +289,31 @@ export default function App() {
         keyIv: encKeyObj.iv
       }
 
-      // Generate a mock CID representing Storacha storage
-      const mockCID = `bafybeih${keccak256(toHex(JSON.stringify(payload))).slice(2, 48)}`
+      const response = await fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
 
-      // Store payload in localStorage simulating decentralized storage download cache
-      localStorage.setItem(`storacha_${mockCID}`, JSON.stringify(payload))
+      const resData = await response.json()
+      if (!response.ok || resData.error) {
+        throw new Error(resData.error || "Failed to upload to Pinata via API proxy.")
+      }
+
+      const pinataCID = resData.cid
 
       // 5. Write to Blockchain
       await tx.send({
         to: SECRET_REGISTRY_ADDRESS,
         abi: SECRET_REGISTRY_ABI,
         functionName: 'storeSecret',
-        args: [selectedVaultId, encName.ciphertext, mockCID, secretType]
+        args: [selectedVaultId, encName.ciphertext, pinataCID, secretType]
       })
 
       // Update UI state
       setDecryptedSecrets(prev => ({
         ...prev,
-        [mockCID]: { name: secretName, value: secretVal }
+        [pinataCID]: { name: secretName, value: secretVal }
       }))
 
       setSecretName('')
@@ -329,21 +336,12 @@ export default function App() {
     }
 
     try {
-      // Fetch from Storacha simulation cache
-      const payloadStr = localStorage.getItem(`storacha_${cid}`)
-      if (!payloadStr) {
-        // Fallback demo decryption if not found in local cache
-        const decName = "Decrypted API Key"
-        const decVal = "sk_live_51Nx...8h3a"
-        setDecryptedSecrets(prev => ({
-          ...prev,
-          [cid]: { name: decName, value: decVal }
-        }))
-        setRevealedSecrets(prev => ({ ...prev, [secretId]: true }))
-        return
+      // Fetch the encrypted payload from public IPFS gateway
+      const response = await fetch(`https://gateway.pinata.cloud/ipfs/${cid}`)
+      if (!response.ok) {
+        throw new Error("Failed to fetch payload from decentralized storage gateway.")
       }
-
-      const payload = JSON.parse(payloadStr)
+      const payload = await response.json()
 
       // Decrypt the secret's key using the Master Key
       const secretKey = await decryptText(payload.encryptedKey, payload.keyIv, masterKey)
