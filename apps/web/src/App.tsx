@@ -35,7 +35,7 @@ import {
   PERMISSION_MANAGER_ABI
 } from './utils/contracts'
 import { generateAESKey, encryptText, decryptText } from './utils/crypto'
-import { keccak256 } from 'viem'
+import { keccak256, createPublicClient, http, toHex } from 'viem'
 
 // Types
 interface Vault {
@@ -61,6 +61,10 @@ interface Secret {
 export default function App() {
   const wallet = useWallet()
   const { signMessage } = useSignMessage()
+  const publicClient = createPublicClient({
+    chain: polygonAmoy,
+    transport: http(import.meta.env.VITE_RPC_URL)
+  })
   // State
   const [activeTab, setActiveTab] = useState<'dashboard' | 'activity' | 'settings'>('dashboard')
   const [selectedVaultId, setSelectedVaultId] = useState<`0x${string}` | null>(null)
@@ -77,6 +81,7 @@ export default function App() {
 
   // Crypto / Unlock
   const [masterKey, setMasterKey] = useState<string | null>(null)
+  const [unlockPassword, setUnlockPassword] = useState('')
   const [isUnlocking, setIsUnlocking] = useState(false)
   const [decryptedSecrets, setDecryptedSecrets] = useState<Record<string, { name: string; value: string }>>({})
   const [revealedSecrets, setRevealedSecrets] = useState<Record<string, boolean>>({})
@@ -87,6 +92,7 @@ export default function App() {
 
   // Copy Feedback
   const [copiedText, setCopiedText] = useState<string | null>(null)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   // Sharing
   const [shareUserAddress, setShareUserAddress] = useState('')
@@ -116,43 +122,21 @@ export default function App() {
         const fetched: Vault[] = []
         for (const vId of myVaultIds) {
           try {
-            // We use simple contract read client logic or fetch via contract client
-            // For simplicity in a single file, we call read contract via simple RPC
-            const response = await fetch(import.meta.env.VITE_RPC_URL, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                jsonrpc: '2.0',
-                id: 1,
-                method: 'eth_call',
-                params: [{
-                  to: VAULT_REGISTRY_ADDRESS,
-                  data: `0x52481e3a${vId.slice(2)}` // getVault(bytes32) selector is 0x52481e3a
-                }, 'latest']
-              })
+            const result = (await publicClient.readContract({
+              address: VAULT_REGISTRY_ADDRESS,
+              abi: VAULT_REGISTRY_ABI,
+              functionName: 'getVault',
+              args: [vId]
+            })) as any
+
+            fetched.push({
+              id: vId,
+              name: result.name || "Unnamed Vault",
+              description: result.description || "No description provided.",
+              owner: result.owner,
+              createdAt: result.createdAt,
+              updatedAt: result.updatedAt
             })
-            const resJson = await response.json()
-            if (resJson.result && resJson.result !== '0x') {
-              // Decode basic fields (rough offset decoding for display)
-              // Since name/description are strings, they have dynamic offsets.
-              // To ensure high reliability, we can simulate clean representations or parse them.
-              // For robustness, let's parse the string representation:
-              // For a premium prototype, we decode standard ABI or simulate metadata gracefully if parsing fails.
-              // Let's decode:
-              const data = resJson.result.slice(2)
-              // Owner starts at index 3 (offset index * 32 bytes)
-              const owner = '0x' + data.slice(192 + 24, 256)
-              // Just to be safe, let's fallback to simulated values if decoding is complex, or decode properly.
-              // Let's assume we can fetch them reliably:
-              fetched.push({
-                id: vId,
-                name: vId === myVaultIds[0] ? "Personal API Keys" : "Production Secrets",
-                description: "Primary encrypted storage for critical tokens.",
-                owner: owner,
-                createdAt: BigInt(Date.now()),
-                updatedAt: BigInt(Date.now())
-              })
-            }
           } catch (e) {
             console.error("Error reading vault details:", e)
           }
@@ -184,35 +168,24 @@ export default function App() {
         const fetched: Secret[] = []
         for (const sId of secretIds) {
           try {
-            // Fetch secret details
-            const response = await fetch(import.meta.env.VITE_RPC_URL, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                jsonrpc: '2.0',
-                id: 1,
-                method: 'eth_call',
-                params: [{
-                  to: SECRET_REGISTRY_ADDRESS,
-                  data: `0x5be37b02${sId.slice(2)}` // getSecret(bytes32) selector is 0x5be37b02
-                }, 'latest']
-              })
+            const result = (await publicClient.readContract({
+              address: SECRET_REGISTRY_ADDRESS,
+              abi: SECRET_REGISTRY_ABI,
+              functionName: 'getSecret',
+              args: [sId],
+              account: wallet.address || undefined
+            })) as any
+
+            fetched.push({
+              id: sId,
+              vaultId: selectedVaultId!,
+              encryptedName: result.encryptedName,
+              cid: result.cid,
+              secretType: result.secretType,
+              version: result.version,
+              createdAt: result.createdAt,
+              updatedAt: result.updatedAt
             })
-            const resJson = await response.json()
-            if (resJson.result && resJson.result !== '0x') {
-              // Simulated clean structures parsed from RPC return
-              // We'll map them to secret list
-              fetched.push({
-                id: sId,
-                vaultId: selectedVaultId!,
-                encryptedName: "U2FsdGVkX1+9K5g==", // AES dummy base64
-                cid: "bafybeic7wsgp7lxtcrhyomslsz6fhywocx7a4vspm36z252u55y7w4u6ye",
-                secretType: "api-key",
-                version: 1n,
-                createdAt: BigInt(Date.now()),
-                updatedAt: BigInt(Date.now())
-              })
-            }
           } catch (e) {
             console.error("Error reading secret details:", e)
           }
@@ -223,22 +196,43 @@ export default function App() {
     } else {
       setSecrets([])
     }
-  }, [secretIds, selectedVaultId])
+  }, [secretIds, selectedVaultId, wallet.address])
 
   // --- actions ---
 
   // Derive Master Key via signing a fixed message
   const handleUnlockVault = async () => {
     setIsUnlocking(true)
+    setErrorMessage(null)
     try {
       const msg = "Authenticate with VaultOne to decrypt your master key"
       const result = await signMessage({
         message: msg
       })
-      const derivedKey = keccak256(result.signature as `0x${string}`)
+      // Slice off the "0x" prefix so we have exactly a 32-byte (64 characters) hex string
+      const derivedKey = keccak256(result.signature as `0x${string}`).slice(2)
       setMasterKey(derivedKey)
-    } catch (err) {
+    } catch (err: any) {
       console.error("Unlock failed:", err)
+      setErrorMessage(err.message || "Failed to sign message and unlock vault.")
+    } finally {
+      setIsUnlocking(false)
+    }
+  }
+
+  // Derive Master Key locally via password
+  const handlePasswordUnlock = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!unlockPassword) return
+    setIsUnlocking(true)
+    setErrorMessage(null)
+    try {
+      // Slice off the "0x" prefix so we have exactly a 32-byte (64 characters) hex string
+      const derivedKey = keccak256(toHex(unlockPassword)).slice(2)
+      setMasterKey(derivedKey)
+    } catch (err: any) {
+      console.error("Local unlock failed:", err)
+      setErrorMessage(err.message || "Failed to unlock vault with password.")
     } finally {
       setIsUnlocking(false)
     }
@@ -575,6 +569,12 @@ export default function App() {
 
           {/* Main Area */}
           <main className="flex-1 p-8">
+            {errorMessage && (
+              <div className="mb-6 p-4 rounded-xl border border-rose-500/20 bg-rose-500/5 text-rose-400 text-xs font-semibold flex items-center justify-between">
+                <span>{errorMessage}</span>
+                <button onClick={() => setErrorMessage(null)} className="text-rose-500 hover:text-rose-300 font-bold ml-4">Dismiss</button>
+              </div>
+            )}
             {activeTab === 'dashboard' && (
               <>
                 {!selectedVaultId ? (
@@ -705,20 +705,50 @@ export default function App() {
 
                     {/* Unlock Status / Zero Trust Notice */}
                     {!masterKey ? (
-                      <div className="p-6 rounded-xl border border-violet-500/20 bg-violet-500/5 text-center flex flex-col items-center justify-center gap-3">
+                      <div className="p-6 rounded-xl border border-violet-500/20 bg-violet-500/5 text-center flex flex-col items-center justify-center gap-4">
                         <Lock className="h-7 w-7 text-violet-400" />
                         <h3 className="text-sm font-bold text-white">Unlock Vault</h3>
                         <p className="text-xs text-zinc-400 max-w-sm leading-normal">
-                          For zero-trust privacy, secrets are decrypted locally in your browser. Sign a cryptographic verification request to derive your secure master key.
+                          For zero-trust privacy, secrets are decrypted locally in your browser. Choose an unlock method below.
                         </p>
-                        <button 
-                          onClick={handleUnlockVault}
-                          disabled={isUnlocking}
-                          className="mt-2 py-1.5 px-4 rounded-md bg-zinc-100 hover:bg-zinc-200 text-zinc-950 text-xs font-bold flex items-center gap-1 transition"
-                        >
-                          {isUnlocking ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Unlock className="h-3.5 w-3.5" />}
-                          Sign & Unlock Vault
-                        </button>
+                        
+                        {/* Option 1: Privy Sign */}
+                        <div className="w-full max-w-xs flex flex-col gap-2">
+                          <button 
+                            onClick={handleUnlockVault}
+                            disabled={isUnlocking}
+                            className="w-full py-2 px-4 rounded-md bg-zinc-100 hover:bg-zinc-200 text-zinc-950 text-xs font-bold flex items-center justify-center gap-1.5 transition"
+                          >
+                            {isUnlocking ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Unlock className="h-3.5 w-3.5" />}
+                            Sign & Unlock Vault
+                          </button>
+                        </div>
+
+                        {/* Divider */}
+                        <div className="w-full max-w-xs flex items-center gap-2 text-[10px] text-zinc-600 font-bold uppercase">
+                          <div className="h-px bg-zinc-800 flex-1"></div>
+                          <span>Or Use Password Fallback</span>
+                          <div className="h-px bg-zinc-800 flex-1"></div>
+                        </div>
+
+                        {/* Option 2: Local Password */}
+                        <form onSubmit={handlePasswordUnlock} className="w-full max-w-xs flex gap-2">
+                          <input 
+                            type="password"
+                            value={unlockPassword}
+                            onChange={(e) => setUnlockPassword(e.target.value)}
+                            placeholder="Enter a local unlock password"
+                            className="flex-1 px-3 py-1.5 bg-zinc-950 border border-zinc-800 rounded-md text-xs font-semibold text-white focus:outline-none focus:border-zinc-700"
+                            required
+                          />
+                          <button 
+                            type="submit"
+                            disabled={isUnlocking}
+                            className="py-1.5 px-3 rounded-md bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-zinc-200 text-xs font-bold transition"
+                          >
+                            Unlock
+                          </button>
+                        </form>
                       </div>
                     ) : (
                       // Secrets List
