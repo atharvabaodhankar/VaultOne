@@ -93,6 +93,8 @@ export default function App() {
   // Copy Feedback
   const [copiedText, setCopiedText] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [isAddingSecret, setIsAddingSecret] = useState(false)
+  const [isCreatingVault, setIsCreatingVault] = useState(false)
 
   // Sharing
   const [shareUserAddress, setShareUserAddress] = useState('')
@@ -242,7 +244,8 @@ export default function App() {
   const handleCreateVault = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!vaultName) return
-
+    setIsCreatingVault(true)
+    setErrorMessage(null)
     try {
       await tx.send({
         to: VAULT_REGISTRY_ADDRESS,
@@ -254,8 +257,11 @@ export default function App() {
       setVaultDesc('')
       setShowCreateVault(false)
       setTimeout(() => refetchVaults(), 3000) // delay to let block index
-    } catch (err) {
+    } catch (err: any) {
       console.error("Create vault failed:", err)
+      setErrorMessage(err.message || "Failed to create vault on-chain.")
+    } finally {
+      setIsCreatingVault(false)
     }
   }
 
@@ -263,7 +269,8 @@ export default function App() {
   const handleAddSecret = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!secretName || !secretVal || !selectedVaultId || !masterKey) return
-
+    setIsAddingSecret(true)
+    setErrorMessage(null)
     try {
       // 1. Generate unique AES Key for this secret
       const itemKey = await generateAESKey()
@@ -315,8 +322,11 @@ export default function App() {
       setSecretVal('')
       setShowAddSecret(false)
       setTimeout(() => refetchSecrets(), 3000)
-    } catch (err) {
+    } catch (err: any) {
       console.error("Add secret failed:", err)
+      setErrorMessage(err.message || "Failed to add secret on-chain.")
+    } finally {
+      setIsAddingSecret(false)
     }
   }
 
@@ -938,8 +948,10 @@ export default function App() {
                 </button>
                 <button 
                   type="submit" 
-                  className="py-1.5 px-3 rounded-md bg-zinc-100 hover:bg-zinc-200 text-zinc-950 text-xs font-bold transition"
+                  disabled={isCreatingVault}
+                  className="py-1.5 px-3 rounded-md bg-zinc-100 hover:bg-zinc-200 text-zinc-950 text-xs font-bold transition flex items-center gap-1.5"
                 >
+                  {isCreatingVault ? <RefreshCw className="h-3 w-3 animate-spin" /> : null}
                   Create
                 </button>
               </div>
@@ -998,8 +1010,10 @@ export default function App() {
                 </button>
                 <button 
                   type="submit" 
-                  className="py-1.5 px-3 rounded-md bg-zinc-100 hover:bg-zinc-200 text-zinc-950 text-xs font-bold transition"
+                  disabled={isAddingSecret}
+                  className="py-1.5 px-3 rounded-md bg-zinc-100 hover:bg-zinc-200 text-zinc-950 text-xs font-bold transition flex items-center gap-1.5"
                 >
+                  {isAddingSecret ? <RefreshCw className="h-3 w-3 animate-spin" /> : null}
                   Add Secret
                 </button>
               </div>
