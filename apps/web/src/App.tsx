@@ -90,6 +90,7 @@ export default function App() {
   const [secretName, setSecretName] = useState('')
   const [secretVal, setSecretVal] = useState('')
   const [secretType, setSecretType] = useState('api-key')
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
 
   const [masterKey, setMasterKey] = useState<string | null>(null)
   const [unlockPassword, setUnlockPassword] = useState('')
@@ -391,13 +392,40 @@ export default function App() {
 
   const handleAddSecret = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!secretName || !secretVal || !selectedVaultId || !masterKey) return
+    
+    const isFile = secretType === 'file'
+    if (isFile && !selectedFile) {
+      setErrorMessage("Please select a file to upload.")
+      return
+    }
+    if (!isFile && (!secretName || !secretVal)) return
+    if (!selectedVaultId || !masterKey) return
+    
     setIsAddingSecret(true)
     setErrorMessage(null)
     try {
+      let finalSecretName = secretName
+      let finalSecretVal = secretVal
+
+      if (isFile && selectedFile) {
+        if (selectedFile.size > 10 * 1024 * 1024) {
+          throw new Error("File size exceeds 10MB limit.")
+        }
+        finalSecretName = secretName || selectedFile.name
+        
+        // Read file as Data URL
+        const reader = new FileReader()
+        const fileDataPromise = new Promise<string>((resolve, reject) => {
+          reader.onload = () => resolve(reader.result as string)
+          reader.onerror = () => reject(new Error("Failed to read file."))
+          reader.readAsDataURL(selectedFile)
+        })
+        finalSecretVal = await fileDataPromise
+      }
+
       const itemKey = await generateAESKey()
-      const encName = await encryptText(secretName, itemKey)
-      const encValue = await encryptText(secretVal, itemKey)
+      const encName = await encryptText(finalSecretName, itemKey)
+      const encValue = await encryptText(finalSecretVal, itemKey)
       const encKeyObj = await encryptText(itemKey, masterKey)
       
       const payload = {
@@ -430,11 +458,12 @@ export default function App() {
 
       setDecryptedSecrets(prev => ({
         ...prev,
-        [pinataCID]: { name: secretName, value: secretVal }
+        [pinataCID]: { name: finalSecretName, value: finalSecretVal }
       }))
 
       setSecretName('')
       setSecretVal('')
+      setSelectedFile(null)
       setShowAddSecret(false)
       retryRefetch(refetchSecrets)
     } catch (err: any) {
@@ -535,6 +564,15 @@ export default function App() {
     navigator.clipboard.writeText(text)
     setCopiedText(label)
     setTimeout(() => setCopiedText(null), 2000)
+  }
+
+  const downloadDecryptedFile = (dataUrl: string, filename: string) => {
+    const link = document.createElement('a')
+    link.href = dataUrl
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
   }
 
   return (
@@ -876,15 +914,34 @@ export default function App() {
                                   </div>
 
                                   {decData && (
-                                    <div className="flex-1 w-full md:w-auto md:mx-6 bg-black p-4 rounded-xl border-4 border-dashed border-white/40 flex items-center justify-between shadow-inner">
-                                      <span className="text-xl font-mono text-[var(--color-max-accent-2)] font-bold break-all">
-                                        {isRevealed ? decData.value : '••••••••••••••••'}
-                                      </span>
-                                      <button onClick={() => copyToClipboard(decData.value, secret.id)} className="ml-4 p-2 bg-white/10 hover:bg-white/20 rounded-lg transition">
-                                        {copiedText === secret.id ? <Check className="h-6 w-6 text-[var(--color-max-accent-3)]" /> : <Copy className="h-6 w-6 text-white" />}
-                                      </button>
-                                    </div>
-                                  )}
+                                     <div className="flex-1 w-full md:w-auto md:mx-6 bg-black p-4 rounded-xl border-4 border-dashed border-white/40 flex items-center justify-between shadow-inner">
+                                       {secret.secretType === 'file' ? (
+                                         <>
+                                           <span className="text-xl font-mono text-[var(--color-max-accent-2)] font-bold break-all truncate max-w-xs">
+                                             {isRevealed ? "DECRYPTED FILE READY" : "••••••••••••••••"}
+                                           </span>
+                                           {isRevealed && (
+                                             <Button 
+                                               colorTheme={3} 
+                                               onClick={() => downloadDecryptedFile(decData.value, decData.name)}
+                                               className="h-10 py-1 px-4 text-xs ml-4 rounded-full shadow-[2px_2px_0_var(--color-max-accent-3)]"
+                                             >
+                                               DOWNLOAD 💾
+                                             </Button>
+                                           )}
+                                         </>
+                                       ) : (
+                                         <>
+                                           <span className="text-xl font-mono text-[var(--color-max-accent-2)] font-bold break-all">
+                                             {isRevealed ? decData.value : '••••••••••••••••'}
+                                           </span>
+                                           <button onClick={() => copyToClipboard(decData.value, secret.id)} className="ml-4 p-2 bg-white/10 hover:bg-white/20 rounded-lg transition">
+                                             {copiedText === secret.id ? <Check className="h-6 w-6 text-[var(--color-max-accent-3)]" /> : <Copy className="h-6 w-6 text-white" />}
+                                           </button>
+                                         </>
+                                       )}
+                                     </div>
+                                   )}
 
                                   <div className="flex gap-4 w-full md:w-auto">
                                     <Button colorTheme={2} variant="outline" className="flex-1 md:w-auto px-4 py-2 h-14" onClick={() => handleDecryptSecret(secret.id, secret.cid, secret.encryptedName)}>
@@ -1013,6 +1070,7 @@ export default function App() {
                   <option value="env-file" className="bg-black">Environment Variable</option>
                   <option value="ssh-key" className="bg-black">SSH Key</option>
                   <option value="password" className="bg-black">Password</option>
+                  <option value="file" className="bg-black">File / .env Upload 📁</option>
                 </select>
               </div>
               <Input 
@@ -1020,21 +1078,35 @@ export default function App() {
                 colorTheme={2} 
                 value={secretName} 
                 onChange={e => setSecretName(e.target.value)} 
-                placeholder="STRIPE_LIVE_KEY" 
-                required 
+                placeholder={secretType === 'file' ? "Filename (defaults to selected file)" : "STRIPE_LIVE_KEY"} 
+                required={secretType !== 'file'} 
               />
-              <div className="flex flex-col gap-2 relative">
-                <label className="font-display text-xl uppercase tracking-wider -rotate-1 origin-left ml-2 text-[var(--color-max-accent-4)]">
-                  Secret Value
-                </label>
-                <textarea 
-                  value={secretVal}
-                  onChange={(e) => setSecretVal(e.target.value)}
-                  className="w-full bg-[var(--color-max-muted)]/50 backdrop-blur-sm border-4 border-[var(--color-max-accent-4)] rounded-2xl px-6 py-4 text-lg font-bold text-white placeholder:text-white/40 focus:outline-none focus:bg-[var(--color-max-muted)] focus:ring-4 focus:ring-offset-2 focus:ring-[#FF6B35]/30 focus:ring-offset-[#7B2FFF] min-h-[120px]"
-                  placeholder="sk_live_..."
-                  required
-                />
-              </div>
+              {secretType === 'file' ? (
+                <div className="flex flex-col gap-2 relative">
+                  <label className="font-display text-xl uppercase tracking-wider -rotate-1 origin-left ml-2 text-[var(--color-max-accent-4)]">
+                    Choose File (Max 10MB)
+                  </label>
+                  <input 
+                    type="file"
+                    onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
+                    className="w-full bg-[var(--color-max-muted)]/50 backdrop-blur-sm border-4 border-[var(--color-max-accent-4)] rounded-full px-6 py-4 text-lg font-bold text-white focus:outline-none focus:ring-4 focus:ring-offset-2"
+                    required
+                  />
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2 relative">
+                  <label className="font-display text-xl uppercase tracking-wider -rotate-1 origin-left ml-2 text-[var(--color-max-accent-4)]">
+                    Secret Value
+                  </label>
+                  <textarea 
+                    value={secretVal}
+                    onChange={(e) => setSecretVal(e.target.value)}
+                    className="w-full bg-[var(--color-max-muted)]/50 backdrop-blur-sm border-4 border-[var(--color-max-accent-4)] rounded-2xl px-6 py-4 text-lg font-bold text-white placeholder:text-white/40 focus:outline-none focus:bg-[var(--color-max-muted)] focus:ring-4 focus:ring-offset-2 focus:ring-[#FF6B35]/30 focus:ring-offset-[#7B2FFF] min-h-[120px]"
+                    placeholder="sk_live_..."
+                    required
+                  />
+                </div>
+              )}
               <div className="flex items-center justify-end gap-4 mt-6">
                 <Button type="button" variant="ghost" onClick={() => setShowAddSecret(false)}>CANCEL</Button>
                 <Button type="submit" colorTheme={1} disabled={isAddingSecret}>
