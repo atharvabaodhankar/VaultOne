@@ -38,6 +38,7 @@ import {
   PERMISSION_MANAGER_ABI
 } from './utils/contracts'
 import { generateAESKey, encryptText, decryptText } from './utils/crypto'
+import { registerPasskey, authenticatePasskey } from './utils/passkeys'
 import { keccak256, createPublicClient, http, toHex } from 'viem'
 import { Button } from './components/Button'
 import { Card, CardHeader, CardTitle } from './components/Card'
@@ -245,26 +246,98 @@ export default function App() {
     setIsUnlocking(true)
     setErrorMessage(null)
     try {
+      // Step 1: Sign message with Web3 wallet
       const msg = "Authenticate with VaultOne to decrypt your master key"
       const result = await signMessage({ message: msg })
-      const derivedKey = keccak256(result.signature as `0x${string}`).slice(2)
-      setMasterKey(derivedKey)
+      const walletDerivedKey = keccak256(result.signature as `0x${string}`).slice(2)
+
+      // Step 2: Enforce biometric Passkey verification
+      const credentialId = localStorage.getItem('vaultone_passkey_credential_id')
+      if (!credentialId) {
+        // Force register passkey if it's the first time
+        const { credentialId: newCredId } = await registerPasskey(wallet.address || "user@vaultone.io")
+        
+        // Wrap/encrypt masterKey with credentialId derivation key
+        const encryptionKey = keccak256(toHex(newCredId)).slice(2)
+        const wrapped = await encryptText(walletDerivedKey, encryptionKey)
+        
+        localStorage.setItem('vaultone_passkey_credential_id', newCredId)
+        localStorage.setItem('vaultone_wrapped_masterkey', JSON.stringify(wrapped))
+        setIsPasskeyRegistered(true)
+        
+        setMasterKey(walletDerivedKey)
+      } else {
+        // Authenticate using existing passkey
+        const authenticated = await authenticatePasskey(credentialId)
+        if (!authenticated) {
+          throw new Error("Biometric verification failed.")
+        }
+        
+        // Verify key integrity
+        const wrappedStr = localStorage.getItem('vaultone_wrapped_masterkey')
+        if (wrappedStr) {
+          const wrapped = JSON.parse(wrappedStr)
+          const decryptionKey = keccak256(toHex(credentialId)).slice(2)
+          const decryptedKey = await decryptText(wrapped.ciphertext, wrapped.iv, decryptionKey)
+          if (decryptedKey !== walletDerivedKey) {
+            throw new Error("Key mismatch. The signed message does not match the registered passkey.")
+          }
+        }
+        
+        setMasterKey(walletDerivedKey)
+      }
     } catch (err: any) {
       console.error("Unlock failed:", err)
-      setErrorMessage(err.message || "Failed to sign message and unlock vault.")
+      setErrorMessage(err.message || "Failed to sign and biometric unlock vault.")
     } finally {
       setIsUnlocking(false)
     }
   }
 
-  const handlePasswordUnlock = (e: React.FormEvent) => {
+  const handlePasswordUnlock = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!unlockPassword) return
     setIsUnlocking(true)
     setErrorMessage(null)
     try {
-      const derivedKey = keccak256(toHex(unlockPassword)).slice(2)
-      setMasterKey(derivedKey)
+      // Step 1: Derive key from password
+      const passwordDerivedKey = keccak256(toHex(unlockPassword)).slice(2)
+
+      // Step 2: Enforce biometric Passkey verification
+      const credentialId = localStorage.getItem('vaultone_passkey_credential_id')
+      if (!credentialId) {
+        // Force register passkey if it's the first time
+        const { credentialId: newCredId } = await registerPasskey(wallet.address || "user@vaultone.io")
+        
+        // Wrap/encrypt masterKey
+        const encryptionKey = keccak256(toHex(newCredId)).slice(2)
+        const wrapped = await encryptText(passwordDerivedKey, encryptionKey)
+        
+        localStorage.setItem('vaultone_passkey_credential_id', newCredId)
+        localStorage.setItem('vaultone_wrapped_masterkey', JSON.stringify(wrapped))
+        setIsPasskeyRegistered(true)
+        
+        setMasterKey(passwordDerivedKey)
+      } else {
+        // Authenticate
+        const authenticated = await authenticatePasskey(credentialId)
+        if (!authenticated) {
+          throw new Error("Biometric verification failed.")
+        }
+        
+        // Verify key integrity
+        const wrappedStr = localStorage.getItem('vaultone_wrapped_masterkey')
+        if (wrappedStr) {
+          const wrapped = JSON.parse(wrappedStr)
+          const decryptionKey = keccak256(toHex(credentialId)).slice(2)
+          const decryptedKey = await decryptText(wrapped.ciphertext, wrapped.iv, decryptionKey)
+          if (decryptedKey !== passwordDerivedKey) {
+            throw new Error("Invalid password.")
+          }
+        }
+        
+        setMasterKey(passwordDerivedKey)
+      }
     } catch (err: any) {
       console.error("Local unlock failed:", err)
       setErrorMessage(err.message || "Failed to unlock vault with password.")
@@ -425,12 +498,37 @@ export default function App() {
     }
   }
 
-  const handleRegisterPasskey = () => {
-    setIsRegisteringPasskey(true)
-    setTimeout(() => {
-      setIsRegisteringPasskey(false)
+  // Check for passkey on mount
+  useEffect(() => {
+    const credId = localStorage.getItem('vaultone_passkey_credential_id')
+    if (credId) {
       setIsPasskeyRegistered(true)
-    }, 1500)
+    }
+  }, [])
+
+  const handleRegisterPasskey = async () => {
+    if (!masterKey) {
+      setErrorMessage("Please unlock your vault first to link it with a Passkey.")
+      return
+    }
+    setIsRegisteringPasskey(true)
+    setErrorMessage(null)
+    try {
+      const { credentialId } = await registerPasskey(wallet.address || "user@vaultone.io")
+      
+      // Encrypt the masterKey using the credentialId as a key derivation salt
+      const encryptionKey = keccak256(toHex(credentialId)).slice(2)
+      const wrapped = await encryptText(masterKey, encryptionKey)
+      
+      localStorage.setItem('vaultone_passkey_credential_id', credentialId)
+      localStorage.setItem('vaultone_wrapped_masterkey', JSON.stringify(wrapped))
+      setIsPasskeyRegistered(true)
+    } catch (err: any) {
+      console.error("Passkey registration failed:", err)
+      setErrorMessage(err.message || "Failed to register Passkey.")
+    } finally {
+      setIsRegisteringPasskey(false)
+    }
   }
 
   const copyToClipboard = (text: string, label: string) => {
@@ -710,13 +808,15 @@ export default function App() {
                           Decrypt your master key locally to access secrets.
                         </p>
                         
-                        <div className="flex flex-col md:flex-row items-center justify-center gap-8 w-full mt-6">
-                          <Button colorTheme={1} size="large" onClick={handleUnlockVault} disabled={isUnlocking} className="w-full max-w-md">
-                            {isUnlocking ? <RefreshCw className="h-6 w-6 animate-spin mr-2" /> : <Unlock className="h-6 w-6 mr-2" />}
-                            SIGN & UNLOCK ⚡
-                          </Button>
+                        <div className="flex flex-col items-center justify-center gap-6 w-full mt-6">
+                          <div className="w-full flex justify-center">
+                            <Button colorTheme={1} size="large" onClick={handleUnlockVault} disabled={isUnlocking} className="w-full max-w-md">
+                              {isUnlocking ? <RefreshCw className="h-6 w-6 animate-spin mr-2" /> : <Unlock className="h-6 w-6 mr-2" />}
+                              SIGN & BIOMETRIC UNLOCK ⚡
+                            </Button>
+                          </div>
                           
-                          <div className="text-2xl font-black italic">OR</div>
+                          <div className="text-2xl font-black italic">OR USE PASSWORD + SCAN</div>
 
                           <form onSubmit={handlePasswordUnlock} className="flex gap-4 w-full max-w-md">
                             <Input 
@@ -729,7 +829,7 @@ export default function App() {
                               className="flex-1"
                             />
                             <Button type="submit" colorTheme={4} disabled={isUnlocking}>
-                              GO
+                              GO ⚡
                             </Button>
                           </form>
                         </div>
@@ -775,9 +875,11 @@ export default function App() {
                                     </div>
                                   </div>
 
-                                  {isRevealed && decData && (
+                                  {decData && (
                                     <div className="flex-1 w-full md:w-auto md:mx-6 bg-black p-4 rounded-xl border-4 border-dashed border-white/40 flex items-center justify-between shadow-inner">
-                                      <span className="text-xl font-mono text-[var(--color-max-accent-2)] font-bold break-all">{decData.value}</span>
+                                      <span className="text-xl font-mono text-[var(--color-max-accent-2)] font-bold break-all">
+                                        {isRevealed ? decData.value : '••••••••••••••••'}
+                                      </span>
                                       <button onClick={() => copyToClipboard(decData.value, secret.id)} className="ml-4 p-2 bg-white/10 hover:bg-white/20 rounded-lg transition">
                                         {copiedText === secret.id ? <Check className="h-6 w-6 text-[var(--color-max-accent-3)]" /> : <Copy className="h-6 w-6 text-white" />}
                                       </button>
