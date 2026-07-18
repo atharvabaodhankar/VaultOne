@@ -24,7 +24,10 @@ import {
   FileText, 
   Settings, 
   Activity, 
-  Fingerprint
+  Fingerprint,
+  Sparkles,
+  Zap,
+  Star
 } from 'lucide-react'
 import { 
   VAULT_REGISTRY_ADDRESS, 
@@ -36,6 +39,10 @@ import {
 } from './utils/contracts'
 import { generateAESKey, encryptText, decryptText } from './utils/crypto'
 import { keccak256, createPublicClient, http, toHex } from 'viem'
+import { Button } from './components/Button'
+import { Card, CardHeader, CardTitle } from './components/Card'
+import { Input } from './components/Input'
+import { cn } from './utils/cn'
 
 // Types
 interface Vault {
@@ -58,6 +65,11 @@ interface Secret {
   updatedAt: bigint;
 }
 
+const getAccentColor = (index: number) => {
+  const colors = [1, 2, 3, 4, 5] as const;
+  return colors[index % colors.length];
+};
+
 export default function App() {
   const wallet = useWallet()
   const { signMessage } = useSignMessage()
@@ -65,11 +77,10 @@ export default function App() {
     chain: polygonAmoy,
     transport: http(import.meta.env.VITE_RPC_URL)
   })
-  // State
+  
   const [activeTab, setActiveTab] = useState<'dashboard' | 'activity' | 'settings'>('dashboard')
   const [selectedVaultId, setSelectedVaultId] = useState<`0x${string}` | null>(null)
   
-  // Modals / Forms
   const [showCreateVault, setShowCreateVault] = useState(false)
   const [vaultName, setVaultName] = useState('')
   const [vaultDesc, setVaultDesc] = useState('')
@@ -79,33 +90,26 @@ export default function App() {
   const [secretVal, setSecretVal] = useState('')
   const [secretType, setSecretType] = useState('api-key')
 
-  // Crypto / Unlock
   const [masterKey, setMasterKey] = useState<string | null>(null)
   const [unlockPassword, setUnlockPassword] = useState('')
   const [isUnlocking, setIsUnlocking] = useState(false)
   const [decryptedSecrets, setDecryptedSecrets] = useState<Record<string, { name: string; value: string }>>({})
   const [revealedSecrets, setRevealedSecrets] = useState<Record<string, boolean>>({})
 
-  // Passkey / WebAuthn Simulation
   const [isPasskeyRegistered, setIsPasskeyRegistered] = useState(false)
   const [isRegisteringPasskey, setIsRegisteringPasskey] = useState(false)
 
-  // Copy Feedback
   const [copiedText, setCopiedText] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isAddingSecret, setIsAddingSecret] = useState(false)
   const [isCreatingVault, setIsCreatingVault] = useState(false)
 
-  // Sharing
   const [shareUserAddress, setShareUserAddress] = useState('')
-  const [sharePermissionLevel, setSharePermissionLevel] = useState('1') // 1 = READ, 2 = WRITE
+  const [sharePermissionLevel, setSharePermissionLevel] = useState('1')
   const [showShareModal, setShowShareModal] = useState(false)
 
-  // Transaction state handlers
   const tx = useTransaction()
 
-  // --- contract reads ---
-  // 1. Get vaults owned by the user
   const { data: myVaultIds, refetch: refetchVaults, isLoading: loadingVaults } = useContractRead({
     address: VAULT_REGISTRY_ADDRESS,
     abi: VAULT_REGISTRY_ABI,
@@ -116,7 +120,6 @@ export default function App() {
     enabled: !!wallet.address
   })
 
-  // 2. Fetch full vault objects for those IDs
   const [vaults, setVaults] = useState<Vault[]>([])
   useEffect(() => {
     if (myVaultIds && myVaultIds.length > 0) {
@@ -151,7 +154,6 @@ export default function App() {
     }
   }, [myVaultIds])
 
-  // 3. Get secrets inside the selected vault
   const { data: secretIds, refetch: refetchSecrets, isLoading: loadingSecrets } = useContractRead({
     address: SECRET_REGISTRY_ADDRESS,
     abi: SECRET_REGISTRY_ABI,
@@ -194,8 +196,6 @@ export default function App() {
         }
         setSecrets(fetched)
 
-        // Auto-reveal any secret whose CID is already in decryptedSecrets cache
-        // (i.e. the user just added it and we cached the plaintext during handleAddSecret)
         const newReveals: Record<string, boolean> = {}
         for (const s of fetched) {
           if (decryptedSecrets[s.cid] && !revealedSecrets[s.id]) {
@@ -212,18 +212,12 @@ export default function App() {
     }
   }, [secretIds, selectedVaultId, wallet.address])
 
-  // --- actions ---
-
-  // Derive Master Key via signing a fixed message
   const handleUnlockVault = async () => {
     setIsUnlocking(true)
     setErrorMessage(null)
     try {
       const msg = "Authenticate with VaultOne to decrypt your master key"
-      const result = await signMessage({
-        message: msg
-      })
-      // Slice off the "0x" prefix so we have exactly a 32-byte (64 characters) hex string
+      const result = await signMessage({ message: msg })
       const derivedKey = keccak256(result.signature as `0x${string}`).slice(2)
       setMasterKey(derivedKey)
     } catch (err: any) {
@@ -234,14 +228,12 @@ export default function App() {
     }
   }
 
-  // Derive Master Key locally via password
   const handlePasswordUnlock = (e: React.FormEvent) => {
     e.preventDefault()
     if (!unlockPassword) return
     setIsUnlocking(true)
     setErrorMessage(null)
     try {
-      // Slice off the "0x" prefix so we have exactly a 32-byte (64 characters) hex string
       const derivedKey = keccak256(toHex(unlockPassword)).slice(2)
       setMasterKey(derivedKey)
     } catch (err: any) {
@@ -252,25 +244,13 @@ export default function App() {
     }
   }
 
-  // Helper: Send a tx and don't hang forever waiting for receipt.
-  // erc4337-kit's tx.send() internally calls waitForTransactionReceipt
-  // which can stall indefinitely for ERC-4337 UserOps on Polygon Amoy.
-  // This races the send against a 30s timeout — once we have a txHash
-  // (meaning the UserOp was submitted to the bundler), we treat it as success.
   const safeSend = async (txArgs: Parameters<typeof tx.send>[0]) => {
     const sendPromise = tx.send(txArgs)
-    const timeoutPromise = new Promise<null>((resolve) => {
-      setTimeout(() => resolve(null), 30000)
-    })
+    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 30000))
     const result = await Promise.race([sendPromise, timeoutPromise])
-    // Even if the timeout wins or result is null, the UserOp was likely
-    // submitted. We check tx.txHash reactively via useEffect below.
     return result
   }
 
-  // Helper: Retry-based refetch to handle block indexing delay.
-  // Polls up to `maxRetries` times with `delayMs` between each attempt,
-  // calling the refetch function and checking if data has grown.
   const retryRefetch = (refetchFn: () => void, delayMs = 3000, maxRetries = 4) => {
     let attempt = 0
     const poll = () => {
@@ -283,7 +263,6 @@ export default function App() {
     setTimeout(poll, delayMs)
   }
 
-  // Create Vault on-chain
   const handleCreateVault = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!vaultName) return
@@ -308,24 +287,17 @@ export default function App() {
     }
   }
 
-  // Add Encrypted Secret
   const handleAddSecret = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!secretName || !secretVal || !selectedVaultId || !masterKey) return
     setIsAddingSecret(true)
     setErrorMessage(null)
     try {
-      // 1. Generate unique AES Key for this secret
       const itemKey = await generateAESKey()
-
-      // 2. Encrypt Name and Content
       const encName = await encryptText(secretName, itemKey)
       const encValue = await encryptText(secretVal, itemKey)
-
-      // 3. Encrypt the secret's AES key with user's Master Key
       const encKeyObj = await encryptText(itemKey, masterKey)
-
-      // 4. Secure Cloudflare Proxy Upload to Pinata
+      
       const payload = {
         ciphertext: encValue.ciphertext,
         iv: encValue.iv,
@@ -344,10 +316,9 @@ export default function App() {
       if (!response.ok || resData.error) {
         throw new Error(resData.error || "Failed to upload to Pinata via API proxy.")
       }
-
+      
       const pinataCID = resData.cid
 
-      // 5. Write to Blockchain
       await safeSend({
         to: SECRET_REGISTRY_ADDRESS,
         abi: SECRET_REGISTRY_ABI,
@@ -355,8 +326,6 @@ export default function App() {
         args: [selectedVaultId, encName.ciphertext, pinataCID, secretType]
       })
 
-      // Cache decrypted values so we can auto-reveal the new secret
-      // once it appears in the list from the blockchain refetch.
       setDecryptedSecrets(prev => ({
         ...prev,
         [pinataCID]: { name: secretName, value: secretVal }
@@ -365,7 +334,6 @@ export default function App() {
       setSecretName('')
       setSecretVal('')
       setShowAddSecret(false)
-      // Retry refetch — block may not be indexed yet
       retryRefetch(refetchSecrets)
     } catch (err: any) {
       console.error("Add secret failed:", err)
@@ -375,42 +343,27 @@ export default function App() {
     }
   }
 
-  // Decrypt secret locally
   const handleDecryptSecret = async (secretId: string, cid: string, encryptedNameCipher: string) => {
     if (!masterKey) return
-
-    // Check memory cache first
     if (decryptedSecrets[cid]) {
       setRevealedSecrets(prev => ({ ...prev, [secretId]: !prev[secretId] }))
       return
     }
-
     try {
-      // Fetch the encrypted payload from public IPFS gateway
       const response = await fetch(`https://gateway.pinata.cloud/ipfs/${cid}`)
-      if (!response.ok) {
-        throw new Error("Failed to fetch payload from decentralized storage gateway.")
-      }
+      if (!response.ok) throw new Error("Failed to fetch payload from decentralized storage gateway.")
       const payload = await response.json()
-
-      // Decrypt the secret's key using the Master Key
       const secretKey = await decryptText(payload.encryptedKey, payload.keyIv, masterKey)
-
-      // Decrypt the fields
       const decName = await decryptText(encryptedNameCipher, payload.nameIv, secretKey)
       const decVal = await decryptText(payload.ciphertext, payload.iv, secretKey)
-
-      setDecryptedSecrets(prev => ({
-        ...prev,
-        [cid]: { name: decName, value: decVal }
-      }))
+      
+      setDecryptedSecrets(prev => ({ ...prev, [cid]: { name: decName, value: decVal } }))
       setRevealedSecrets(prev => ({ ...prev, [secretId]: true }))
     } catch (err) {
       console.error("Decryption failed:", err)
     }
   }
 
-  // Delete Secret
   const handleDeleteSecret = async (secretId: `0x${string}`) => {
     try {
       await safeSend({
@@ -419,7 +372,6 @@ export default function App() {
         functionName: 'deleteSecret',
         args: [secretId]
       })
-      // Optimistic UI: remove from local state immediately
       setSecrets(prev => prev.filter(s => s.id !== secretId))
       retryRefetch(refetchSecrets)
     } catch (err) {
@@ -427,11 +379,9 @@ export default function App() {
     }
   }
 
-  // Share vault permission
   const handleShareVault = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!shareUserAddress || !selectedVaultId) return
-
     try {
       await tx.send({
         to: PERMISSION_MANAGER_ADDRESS,
@@ -446,7 +396,6 @@ export default function App() {
     }
   }
 
-  // Passkey registration simulation
   const handleRegisterPasskey = () => {
     setIsRegisteringPasskey(true)
     setTimeout(() => {
@@ -455,7 +404,6 @@ export default function App() {
     }, 1500)
   }
 
-  // Copy to clipboard helper
   const copyToClipboard = (text: string, label: string) => {
     navigator.clipboard.writeText(text)
     setCopiedText(label)
@@ -463,52 +411,58 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col antialiased selection:bg-violet-500/30">
+    <div className="min-h-screen bg-[var(--color-max-bg)] text-white flex flex-col antialiased relative overflow-x-hidden">
+      
+      {/* Global Background Patterns */}
+      <div className="fixed inset-0 pattern-dots z-0"></div>
+      <div className="fixed inset-0 pattern-stripes opacity-30 z-0"></div>
+      
+      {/* Decorative Floating Shapes */}
+      <Sparkles className="absolute top-[10%] left-[5%] text-[var(--color-max-accent-2)] h-16 w-16 animate-float z-10" />
+      <Zap className="absolute top-[60%] right-[10%] text-[var(--color-max-accent-3)] h-24 w-24 animate-wiggle z-10" />
+      <Star className="absolute bottom-[20%] left-[15%] text-[var(--color-max-accent-4)] h-12 w-12 animate-float-reverse z-10" />
+      <div className="absolute -top-[10%] -right-[10%] text-[20rem] font-black opacity-10 text-[var(--color-max-accent-1)] -rotate-12 z-0 pointer-events-none select-none">
+        VAULT
+      </div>
+
       {/* Header */}
-      <header className="border-b border-zinc-800/80 bg-zinc-950/70 backdrop-blur-md sticky top-0 z-50 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="h-9 w-9 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-center glow-accent">
-            <Shield className="h-5 w-5 text-zinc-100" />
+      <header className="border-b-8 border-[var(--color-max-accent-1)] bg-[var(--color-max-bg)] sticky top-0 z-50 px-6 py-4 flex items-center justify-between shadow-hard-triple">
+        <div className="flex items-center gap-4">
+          <div className="h-12 w-12 rounded-full bg-[var(--color-max-accent-2)] border-4 border-[var(--color-max-accent-3)] flex items-center justify-center animate-spin-slow">
+            <Shield className="h-6 w-6 text-black" />
           </div>
           <div>
-            <h1 className="text-lg font-bold tracking-tight text-white m-0">VaultOne</h1>
-            <p className="text-xs text-zinc-400 font-medium">Decentralized Secret Manager</p>
+            <h1 className="text-3xl font-display uppercase tracking-widest text-white text-shadow-single m-0 leading-none mt-2">VaultOne</h1>
           </div>
         </div>
 
         {wallet.authenticated && (
-          <div className="flex items-center gap-4">
-            {/* Account Details */}
-            <div className="hidden md:flex items-center gap-3 text-right">
+          <div className="flex items-center gap-6">
+            <div className="hidden md:flex items-center gap-4 text-right">
               <div>
-                <div className="flex items-center gap-1.5 justify-end">
-                  <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                  <span className="text-xs font-semibold text-zinc-300">Gasless Mode</span>
+                <div className="flex items-center gap-2 justify-end mb-1">
+                  <span className="h-3 w-3 rounded-full bg-[var(--color-max-accent-2)] animate-pulse shadow-glow-base"></span>
+                  <span className="text-sm font-bold text-[var(--color-max-accent-2)] uppercase">Gasless</span>
                 </div>
                 <button 
                   onClick={() => copyToClipboard(wallet.address || '', 'address')}
-                  className="text-xs font-mono text-zinc-400 hover:text-zinc-200 flex items-center gap-1 mt-0.5"
+                  className="text-sm font-mono font-bold text-white hover:text-[var(--color-max-accent-3)] flex items-center gap-1 bg-[var(--color-max-muted)] px-3 py-1 rounded-full border-2 border-[var(--color-max-accent-2)]"
                 >
                   {wallet.address?.slice(0, 6)}...{wallet.address?.slice(-4)}
-                  {copiedText === 'address' ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+                  {copiedText === 'address' ? <Check className="h-4 w-4 text-[var(--color-max-accent-2)]" /> : <Copy className="h-4 w-4" />}
                 </button>
-              </div>
-              <div className="h-8 w-px bg-zinc-800"></div>
-              <div className="text-left">
-                <span className="text-xs text-zinc-500 block">Balance</span>
-                <span className="text-xs font-mono font-bold text-zinc-300">
-                  {wallet.balance?.isLoading ? '...' : `${Number(wallet.balance?.formatted || 0).toFixed(4)} ${wallet.balance?.symbol || 'ETH'}`}
-                </span>
               </div>
             </div>
 
-            <button 
+            <Button 
+              variant="outline" 
+              colorTheme={4} 
+              size="default" 
               onClick={wallet.logout}
-              className="px-3 py-1.5 rounded-md bg-zinc-900 border border-zinc-800 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 hover:text-white transition flex items-center gap-1.5"
+              className="py-2 h-auto text-sm px-4 rounded-xl shadow-[4px_4px_0_var(--color-max-accent-4)] hover:shadow-[6px_6px_0_var(--color-max-accent-4)]"
             >
-              <LogOut className="h-3.5 w-3.5" />
-              Sign Out
-            </button>
+              <LogOut className="h-4 w-4 mr-2" /> SIGN OUT
+            </Button>
           </div>
         )}
       </header>
@@ -516,378 +470,300 @@ export default function App() {
       {/* Main Container */}
       {!wallet.authenticated ? (
         // Land / Sign in page
-        <div className="flex-1 flex flex-col items-center justify-center p-6 relative overflow-hidden">
-          <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-96 h-96 bg-violet-600/5 rounded-full blur-3xl -z-10"></div>
-          
-          <div className="max-w-md w-full glass rounded-2xl p-8 border border-zinc-800/80 shadow-2xl flex flex-col items-center text-center relative">
-            <div className="h-14 w-14 rounded-2xl bg-zinc-900/80 border border-zinc-800 flex items-center justify-center shadow-inner mb-6 glow-accent">
-              <Lock className="h-7 w-7 text-white" />
+        <div className="flex-1 flex flex-col items-center justify-center p-6 relative z-20">
+          <Card colorTheme={1} pattern="mesh" className="max-w-2xl w-full text-center p-12 -mt-20">
+            <div className="h-24 w-24 rounded-full bg-gradient-shift border-4 border-[var(--color-max-accent-3)] flex items-center justify-center shadow-glow-large mx-auto mb-8">
+              <Lock className="h-10 w-10 text-white animate-wiggle" />
             </div>
 
-            <h2 className="text-2xl font-bold tracking-tight text-white mb-2">Welcome to VaultOne</h2>
-            <p className="text-zinc-400 text-sm mb-8 max-w-sm">
-              Secure your developer secrets, environment variables, and private keys with zero trust client-side encryption and gasless smart accounts.
+            <h2 className="text-6xl md:text-8xl font-black uppercase tracking-tight text-white text-shadow-mega mb-6 leading-none">
+              Welcome to <br/><span className="text-gradient bg-gradient-shift">VaultOne</span>
+            </h2>
+            <p className="text-xl md:text-2xl font-bold mb-12 max-w-lg mx-auto text-white/80">
+              Zero trust client-side encryption 🔥 Gasless smart accounts 🚀 Maximum security.
             </p>
 
             {wallet.isLoading ? (
-              <div className="flex items-center gap-2 text-zinc-400 text-sm font-semibold">
-                <RefreshCw className="h-4 w-4 animate-spin text-violet-500" />
-                Preparing smart account...
+              <div className="flex items-center justify-center gap-4 text-2xl font-bold text-[var(--color-max-accent-2)] animate-pulse">
+                <RefreshCw className="h-8 w-8 animate-spin" />
+                PREPARING ACCOUNT...
               </div>
             ) : (
-              <button 
-                onClick={wallet.login}
-                className="w-full py-3 px-4 rounded-xl bg-white text-zinc-950 font-bold hover:bg-zinc-200 transition duration-150 shadow-md shadow-white/5 flex items-center justify-center gap-2"
-              >
-                Continue with Google
-              </button>
+              <Button onClick={wallet.login} size="large" className="w-full text-2xl">
+                CONTINUE WITH GOOGLE ⚡
+              </Button>
             )}
-
-            <div className="mt-8 pt-6 border-t border-zinc-900 w-full flex justify-between text-[11px] text-zinc-500">
-              <span>Powered by ERC-4337</span>
-              <span>•</span>
-              <span>Polygon Amoy Testnet</span>
-            </div>
-          </div>
+          </Card>
         </div>
       ) : (
         // Authenticated Dashboard
-        <div className="flex-1 flex flex-col md:flex-row">
+        <div className="flex-1 flex flex-col md:flex-row z-20">
           
           {/* Left Sidebar */}
-          <aside className="w-full md:w-64 border-b md:border-b-0 md:border-r border-zinc-900 bg-zinc-950/40 p-6 flex flex-col gap-6">
-            <div className="flex flex-col gap-1">
-              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Navigation</span>
-              <nav className="flex flex-col gap-1.5 mt-2">
-                <button 
-                  onClick={() => { setActiveTab('dashboard'); setSelectedVaultId(null); }}
-                  className={`w-full text-left px-3 py-2 rounded-md text-xs font-semibold flex items-center gap-2 transition ${activeTab === 'dashboard' ? 'bg-zinc-900 text-white border border-zinc-800' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/30'}`}
-                >
-                  <Folder className="h-4 w-4" />
-                  Dashboard & Vaults
-                </button>
-                <button 
-                  onClick={() => setActiveTab('activity')}
-                  className={`w-full text-left px-3 py-2 rounded-md text-xs font-semibold flex items-center gap-2 transition ${activeTab === 'activity' ? 'bg-zinc-900 text-white border border-zinc-800' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/30'}`}
-                >
-                  <Activity className="h-4 w-4" />
-                  Activity History
-                </button>
-                <button 
-                  onClick={() => setActiveTab('settings')}
-                  className={`w-full text-left px-3 py-2 rounded-md text-xs font-semibold flex items-center gap-2 transition ${activeTab === 'settings' ? 'bg-zinc-900 text-white border border-zinc-800' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/30'}`}
-                >
-                  <Settings className="h-4 w-4" />
-                  Settings
-                </button>
-              </nav>
-            </div>
+          <aside className="w-full md:w-72 border-b-8 md:border-b-0 md:border-r-8 border-[var(--color-max-accent-2)] bg-[var(--color-max-muted)]/90 p-8 flex flex-col gap-10">
+            <nav className="flex flex-col gap-4">
+              <Button 
+                variant={activeTab === 'dashboard' ? 'primary' : 'ghost'} 
+                colorTheme={3}
+                onClick={() => { setActiveTab('dashboard'); setSelectedVaultId(null); }}
+                className={cn("w-full justify-start py-4", activeTab === 'dashboard' && 'rotate-1')}
+              >
+                <Folder className="h-5 w-5 mr-3" /> VAULTS
+              </Button>
+              <Button 
+                variant={activeTab === 'activity' ? 'primary' : 'ghost'} 
+                colorTheme={2}
+                onClick={() => setActiveTab('activity')}
+                className={cn("w-full justify-start py-4", activeTab === 'activity' && '-rotate-1')}
+              >
+                <Activity className="h-5 w-5 mr-3" /> ACTIVITY
+              </Button>
+              <Button 
+                variant={activeTab === 'settings' ? 'primary' : 'ghost'} 
+                colorTheme={1}
+                onClick={() => setActiveTab('settings')}
+                className={cn("w-full justify-start py-4", activeTab === 'settings' && 'rotate-1')}
+              >
+                <Settings className="h-5 w-5 mr-3" /> SETTINGS
+              </Button>
+            </nav>
 
-            {/* Passkey Card */}
-            <div className="p-4 rounded-xl border border-zinc-800/80 bg-zinc-900/30 flex flex-col gap-3">
-              <div className="flex items-center gap-2">
-                <Fingerprint className="h-4 w-4 text-violet-400" />
-                <span className="text-xs font-semibold text-zinc-300">Biometric Passkey</span>
+            <Card colorTheme={5} asymmetric="clip-corner" className="p-6 mt-4 rotate-2">
+              <div className="flex items-center gap-3 mb-4">
+                <Fingerprint className="h-6 w-6 text-[var(--color-max-accent-5)]" />
+                <span className="text-lg font-black uppercase text-shadow-single">Passkey 🔑</span>
               </div>
-              <p className="text-[10px] text-zinc-400 leading-relaxed">
-                Add an extra layer of passwordless face verification using WebAuthn.
-              </p>
-              <button 
+              <Button 
+                variant={isPasskeyRegistered ? 'outline' : 'primary'} 
+                colorTheme={5}
+                size="default"
                 onClick={handleRegisterPasskey}
                 disabled={isPasskeyRegistered || isRegisteringPasskey}
-                className={`w-full py-1.5 px-3 rounded-md text-[11px] font-bold transition flex items-center justify-center gap-1.5 ${
-                  isPasskeyRegistered 
-                    ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400' 
-                    : 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700 border border-zinc-700'
-                }`}
+                className="w-full text-sm h-12"
               >
                 {isRegisteringPasskey ? (
-                  <RefreshCw className="h-3 w-3 animate-spin" />
+                  <RefreshCw className="h-5 w-5 animate-spin" />
                 ) : isPasskeyRegistered ? (
-                  'Passkey Registered'
+                  'REGISTERED ✅'
                 ) : (
-                  'Register Passkey'
+                  'REGISTER NOW'
                 )}
-              </button>
-            </div>
-
-            {/* Infrastructure info */}
-            <div className="mt-auto pt-6 border-t border-zinc-900 text-[10px] text-zinc-500 flex flex-col gap-1.5">
-              <div className="flex justify-between">
-                <span>Network</span>
-                <span className="font-mono text-zinc-400">Polygon Amoy</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Account</span>
-                <span className="font-mono text-zinc-400">ERC-4337</span>
-              </div>
-            </div>
+              </Button>
+            </Card>
           </aside>
 
           {/* Main Area */}
-          <main className="flex-1 p-8">
+          <main className="flex-1 p-6 md:p-12 lg:p-16">
             {errorMessage && (
-              <div className="mb-6 p-4 rounded-xl border border-rose-500/20 bg-rose-500/5 text-rose-400 text-xs font-semibold flex items-center justify-between">
-                <span>{errorMessage}</span>
-                <button onClick={() => setErrorMessage(null)} className="text-rose-500 hover:text-rose-300 font-bold ml-4">Dismiss</button>
+              <div className="mb-8 p-6 rounded-2xl border-4 border-rose-500 bg-rose-500/20 text-white font-bold text-xl flex items-center justify-between shadow-hard-double shadow-rose-500/50">
+                <span>⚠️ {errorMessage}</span>
+                <Button variant="outline" colorTheme={4} onClick={() => setErrorMessage(null)} className="h-auto py-2 text-sm bg-rose-950">DISMISS</Button>
               </div>
             )}
+            
             {activeTab === 'dashboard' && (
               <>
                 {!selectedVaultId ? (
                   // Default Dashboard view (list vaults)
-                  <div className="flex flex-col gap-6 max-w-5xl">
-                    <div className="flex items-center justify-between">
+                  <div className="flex flex-col gap-12 max-w-6xl mx-auto">
+                    <div className="flex flex-col md:flex-row items-start md:items-end justify-between gap-6">
                       <div>
-                        <h2 className="text-xl font-bold tracking-tight text-white">Dashboard</h2>
-                        <p className="text-xs text-zinc-400">Manage, organize, and access your encrypted vaults.</p>
+                        <h2 className="text-6xl md:text-8xl font-black uppercase tracking-tighter text-shadow-mega mb-2 text-white leading-none">
+                          Dashboard
+                        </h2>
+                        <p className="text-2xl font-bold text-[var(--color-max-accent-2)] uppercase">Manage your encrypted vaults 🚀</p>
                       </div>
-                      <button 
-                        onClick={() => setShowCreateVault(true)}
-                        className="py-1.5 px-3 rounded-md bg-zinc-100 hover:bg-zinc-200 text-zinc-950 text-xs font-bold flex items-center gap-1 transition"
-                      >
-                        <Plus className="h-3.5 w-3.5" />
-                        Create Vault
-                      </button>
+                      <Button colorTheme={1} onClick={() => setShowCreateVault(true)} className="-rotate-2 hover:rotate-0">
+                        <Plus className="h-6 w-6 mr-2" /> NEW VAULT
+                      </Button>
                     </div>
 
                     {/* Stats */}
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                      <div className="p-4 rounded-xl border border-zinc-800/80 bg-zinc-900/10">
-                        <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-bold block">Total Vaults</span>
-                        <span className="text-2xl font-mono font-bold text-white mt-1 block">{loadingVaults ? '...' : vaults.length}</span>
-                      </div>
-                      <div className="p-4 rounded-xl border border-zinc-800/80 bg-zinc-900/10">
-                        <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-bold block">Storage Used</span>
-                        <span className="text-2xl font-mono font-bold text-white mt-1 block">4.2 KB</span>
-                      </div>
-                      <div className="p-4 rounded-xl border border-zinc-800/80 bg-zinc-900/10">
-                        <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-bold block">Sponsored Transactions</span>
-                        <span className="text-2xl font-mono font-bold text-emerald-400 mt-1 block">100%</span>
-                      </div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+                      {[
+                        { title: 'Total Vaults', val: loadingVaults ? '...' : vaults.length, theme: 2 as const, skew: '-skew-x-2' },
+                        { title: 'Storage Used', val: '4.2 KB', theme: 3 as const, skew: 'skew-x-2' },
+                        { title: 'Gas Sponsored', val: '100%', theme: 1 as const, skew: '-skew-x-2' }
+                      ].map((stat, i) => (
+                        <Card key={i} colorTheme={stat.theme} className={cn("p-6 text-center transform transition-transform", stat.skew)}>
+                          <span className="text-xl font-bold uppercase text-[var(--color-max-accent-1)] block mb-2">{stat.title}</span>
+                          <span className="text-6xl font-black text-shadow-double block">{stat.val}</span>
+                        </Card>
+                      ))}
                     </div>
 
                     {/* Vaults Grid */}
-                    <div className="mt-4">
-                      <h3 className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3">Your Vaults</h3>
+                    <div className="mt-8">
                       {loadingVaults ? (
-                        <div className="py-12 flex items-center justify-center gap-2 text-zinc-400 text-xs">
-                          <RefreshCw className="h-4 w-4 animate-spin text-zinc-500" />
-                          Loading vaults from blockchain...
+                        <div className="py-20 flex flex-col items-center justify-center gap-6">
+                          <RefreshCw className="h-16 w-16 animate-spin text-[var(--color-max-accent-3)]" />
+                          <h3 className="text-4xl font-black uppercase text-shadow-single">LOADING VAULTS...</h3>
                         </div>
                       ) : vaults.length === 0 ? (
-                        <div className="py-16 text-center border border-dashed border-zinc-800 rounded-xl flex flex-col items-center justify-center gap-2">
-                          <Folder className="h-8 w-8 text-zinc-600" />
-                          <p className="text-xs text-zinc-400">No vaults created yet.</p>
-                          <button 
-                            onClick={() => setShowCreateVault(true)}
-                            className="mt-2 text-[11px] font-bold text-zinc-200 hover:text-white underline"
-                          >
-                            Create your first vault
-                          </button>
-                        </div>
+                        <Card colorTheme={4} pattern="stripes" className="py-24 text-center flex flex-col items-center justify-center gap-6 border-dashed border-8">
+                          <Folder className="h-24 w-24 text-[var(--color-max-accent-4)] animate-bounce-subtle" />
+                          <h3 className="text-4xl font-black uppercase">NO VAULTS YET 😲</h3>
+                          <Button colorTheme={1} onClick={() => setShowCreateVault(true)} size="large">
+                            CREATE YOUR FIRST VAULT!
+                          </Button>
+                        </Card>
                       ) : (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          {vaults.map((vault) => (
-                            <div 
-                              key={vault.id}
-                              onClick={() => setSelectedVaultId(vault.id)}
-                              className="p-5 rounded-xl border border-zinc-800/80 bg-zinc-900/20 glass-hover cursor-pointer flex flex-col gap-3 group text-left"
-                            >
-                              <div className="flex items-start justify-between">
-                                <div className="h-8 w-8 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-center">
-                                  <Folder className="h-4 w-4 text-zinc-300" />
-                                </div>
-                                <span className="text-[10px] font-mono text-zinc-500 group-hover:text-zinc-400">
-                                  {vault.id.slice(0, 10)}...
-                                </span>
-                              </div>
-                              <div>
-                                <h4 className="text-sm font-bold text-white group-hover:text-zinc-200 transition">{vault.name}</h4>
-                                <p className="text-xs text-zinc-400 mt-1 leading-normal">{vault.description}</p>
-                              </div>
-                            </div>
-                          ))}
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                          {vaults.map((vault, i) => {
+                            const theme = getAccentColor(i);
+                            return (
+                              <Card 
+                                key={vault.id}
+                                colorTheme={theme}
+                                asymmetric={i % 2 === 0 ? 'rotate-left' : 'rotate-right'}
+                                pattern="dots"
+                                onClick={() => setSelectedVaultId(vault.id)}
+                                className={cn("cursor-pointer flex flex-col gap-4", i % 2 === 1 && 'md:translate-y-8')}
+                              >
+                                <CardHeader colorTheme={theme} className="pb-4 mb-2 flex flex-row items-center justify-between">
+                                  <div className={cn("h-12 w-12 rounded-xl flex items-center justify-center border-4", 
+                                    theme === 1 ? 'bg-[var(--color-max-accent-2)] border-[var(--color-max-accent-3)]' : 
+                                    theme === 2 ? 'bg-[var(--color-max-accent-3)] border-[var(--color-max-accent-1)]' : 
+                                    theme === 3 ? 'bg-[var(--color-max-accent-4)] border-[var(--color-max-accent-5)]' : 
+                                    theme === 4 ? 'bg-[var(--color-max-accent-5)] border-[var(--color-max-accent-2)]' : 
+                                    'bg-[var(--color-max-accent-1)] border-[var(--color-max-accent-4)]')}>
+                                    <Folder className="h-6 w-6 text-black" />
+                                  </div>
+                                  <span className="text-sm font-bold bg-black/50 px-2 py-1 rounded">ID: {vault.id.slice(0,6)}</span>
+                                </CardHeader>
+                                <CardTitle className="text-3xl line-clamp-1">{vault.name}</CardTitle>
+                                <p className="text-lg font-bold text-white/80 line-clamp-2">{vault.description}</p>
+                              </Card>
+                            )
+                          })}
                         </div>
                       )}
                     </div>
                   </div>
                 ) : (
                   // Inside specific Vault
-                  <div className="flex flex-col gap-6 max-w-5xl">
-                    {/* Breadcrumbs / Back button */}
-                    <div className="flex items-center gap-2 text-xs font-semibold text-zinc-400">
-                      <button onClick={() => setSelectedVaultId(null)} className="hover:text-white">Dashboard</button>
-                      <span>/</span>
-                      <span className="text-zinc-200">
-                        {vaults.find(v => v.id === selectedVaultId)?.name || 'Vault Details'}
-                      </span>
+                  <div className="flex flex-col gap-10 max-w-5xl mx-auto">
+                    {/* Breadcrumbs */}
+                    <div className="flex items-center gap-4 text-xl font-bold uppercase">
+                      <Button variant="ghost" className="px-4 py-2 h-auto text-xl" onClick={() => setSelectedVaultId(null)}>← BACK</Button>
                     </div>
 
                     {/* Vault Header */}
-                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-zinc-900 pb-5">
+                    <Card colorTheme={5} pattern="mesh" className="flex flex-col md:flex-row items-start md:items-center justify-between gap-6 p-8">
                       <div>
-                        <h2 className="text-xl font-bold tracking-tight text-white">
-                          {vaults.find(v => v.id === selectedVaultId)?.name || 'Vault'}
+                        <h2 className="text-5xl md:text-7xl font-black uppercase text-shadow-triple mb-2">
+                          {vaults.find(v => v.id === selectedVaultId)?.name || 'VAULT'}
                         </h2>
-                        <p className="text-xs text-zinc-400 mt-1">
-                          {vaults.find(v => v.id === selectedVaultId)?.description || 'Secured vault contents.'}
+                        <p className="text-xl font-bold text-[var(--color-max-accent-2)]">
+                          {vaults.find(v => v.id === selectedVaultId)?.description}
                         </p>
                       </div>
 
-                      {/* Header Actions */}
-                      <div className="flex items-center gap-2">
-                        <button 
-                          onClick={() => setShowShareModal(true)}
-                          className="py-1.5 px-3 rounded-md bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-zinc-300 text-xs font-bold flex items-center gap-1 transition"
-                        >
-                          <Share2 className="h-3.5 w-3.5" />
-                          Share
-                        </button>
-                        <button 
-                          onClick={() => {
-                            if (!masterKey) {
-                              handleUnlockVault();
-                            } else {
-                              setShowAddSecret(true);
-                            }
-                          }}
-                          className="py-1.5 px-3 rounded-md bg-zinc-100 hover:bg-zinc-200 text-zinc-950 text-xs font-bold flex items-center gap-1 transition"
-                        >
-                          <Plus className="h-3.5 w-3.5" />
-                          Add Secret
-                        </button>
+                      <div className="flex flex-col sm:flex-row items-center gap-4 w-full md:w-auto">
+                        <Button colorTheme={2} variant="secondary" onClick={() => setShowShareModal(true)} className="w-full sm:w-auto">
+                          <Share2 className="h-5 w-5 mr-2" /> SHARE
+                        </Button>
+                        <Button colorTheme={1} onClick={() => {
+                          if (!masterKey) handleUnlockVault();
+                          else setShowAddSecret(true);
+                        }} className="w-full sm:w-auto">
+                          <Plus className="h-5 w-5 mr-2" /> ADD SECRET
+                        </Button>
                       </div>
-                    </div>
+                    </Card>
 
-                    {/* Unlock Status / Zero Trust Notice */}
+                    {/* Unlock Status */}
                     {!masterKey ? (
-                      <div className="p-6 rounded-xl border border-violet-500/20 bg-violet-500/5 text-center flex flex-col items-center justify-center gap-4">
-                        <Lock className="h-7 w-7 text-violet-400" />
-                        <h3 className="text-sm font-bold text-white">Unlock Vault</h3>
-                        <p className="text-xs text-zinc-400 max-w-sm leading-normal">
-                          For zero-trust privacy, secrets are decrypted locally in your browser. Choose an unlock method below.
+                      <Card colorTheme={3} asymmetric="rotate-right" className="text-center py-16 flex flex-col items-center justify-center gap-8">
+                        <Lock className="h-20 w-20 text-[var(--color-max-accent-1)] animate-wiggle" />
+                        <h3 className="text-5xl font-black uppercase text-shadow-double">UNLOCK REQUIRED 🛑</h3>
+                        <p className="text-2xl font-bold text-white/90 max-w-2xl">
+                          Decrypt your master key locally to access secrets.
                         </p>
                         
-                        {/* Option 1: Privy Sign */}
-                        <div className="w-full max-w-xs flex flex-col gap-2">
-                          <button 
-                            onClick={handleUnlockVault}
-                            disabled={isUnlocking}
-                            className="w-full py-2 px-4 rounded-md bg-zinc-100 hover:bg-zinc-200 text-zinc-950 text-xs font-bold flex items-center justify-center gap-1.5 transition"
-                          >
-                            {isUnlocking ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Unlock className="h-3.5 w-3.5" />}
-                            Sign & Unlock Vault
-                          </button>
-                        </div>
+                        <div className="flex flex-col md:flex-row items-center justify-center gap-8 w-full mt-6">
+                          <Button colorTheme={1} size="large" onClick={handleUnlockVault} disabled={isUnlocking} className="w-full max-w-md">
+                            {isUnlocking ? <RefreshCw className="h-6 w-6 animate-spin mr-2" /> : <Unlock className="h-6 w-6 mr-2" />}
+                            SIGN & UNLOCK ⚡
+                          </Button>
+                          
+                          <div className="text-2xl font-black italic">OR</div>
 
-                        {/* Divider */}
-                        <div className="w-full max-w-xs flex items-center gap-2 text-[10px] text-zinc-600 font-bold uppercase">
-                          <div className="h-px bg-zinc-800 flex-1"></div>
-                          <span>Or Use Password Fallback</span>
-                          <div className="h-px bg-zinc-800 flex-1"></div>
+                          <form onSubmit={handlePasswordUnlock} className="flex gap-4 w-full max-w-md">
+                            <Input 
+                              type="password" 
+                              colorTheme={4} 
+                              value={unlockPassword}
+                              onChange={(e) => setUnlockPassword(e.target.value)}
+                              placeholder="Local Password"
+                              required
+                              className="flex-1"
+                            />
+                            <Button type="submit" colorTheme={4} disabled={isUnlocking}>
+                              GO
+                            </Button>
+                          </form>
                         </div>
-
-                        {/* Option 2: Local Password */}
-                        <form onSubmit={handlePasswordUnlock} className="w-full max-w-xs flex gap-2">
-                          <input 
-                            type="password"
-                            value={unlockPassword}
-                            onChange={(e) => setUnlockPassword(e.target.value)}
-                            placeholder="Enter a local unlock password"
-                            className="flex-1 px-3 py-1.5 bg-zinc-950 border border-zinc-800 rounded-md text-xs font-semibold text-white focus:outline-none focus:border-zinc-700"
-                            required
-                          />
-                          <button 
-                            type="submit"
-                            disabled={isUnlocking}
-                            className="py-1.5 px-3 rounded-md bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-zinc-200 text-xs font-bold transition"
-                          >
-                            Unlock
-                          </button>
-                        </form>
-                      </div>
+                      </Card>
                     ) : (
                       // Secrets List
-                      <div className="flex flex-col gap-4">
-                        <div className="flex items-center justify-between text-xs font-bold text-zinc-500 uppercase tracking-wider">
-                          <span>Secrets</span>
-                          <span>{loadingSecrets ? 'Refreshing...' : `${secrets.length} items`}</span>
-                        </div>
+                      <div className="flex flex-col gap-8">
+                        <h3 className="text-4xl font-black uppercase text-shadow-single flex items-center justify-between">
+                          <span>SECRETS 🤫</span>
+                          <span className="text-2xl bg-[var(--color-max-accent-5)] px-4 py-1 rounded-full border-4 border-black">
+                            {loadingSecrets ? 'REFRESHING...' : `${secrets.length} ITEMS`}
+                          </span>
+                        </h3>
 
                         {loadingSecrets ? (
-                          <div className="py-12 flex items-center justify-center gap-2 text-zinc-400 text-xs">
-                            <RefreshCw className="h-4 w-4 animate-spin text-zinc-500" />
-                            Loading secrets from blockchain...
+                          <div className="py-20 flex justify-center">
+                            <RefreshCw className="h-16 w-16 animate-spin text-[var(--color-max-accent-2)]" />
                           </div>
                         ) : secrets.length === 0 ? (
-                          <div className="py-16 text-center border border-dashed border-zinc-800 rounded-xl flex flex-col items-center justify-center gap-2">
-                            <Key className="h-8 w-8 text-zinc-600" />
-                            <p className="text-xs text-zinc-400">No secrets inside this vault.</p>
-                            <button 
-                              onClick={() => setShowAddSecret(true)}
-                              className="mt-2 text-[11px] font-bold text-zinc-200 hover:text-white underline"
-                            >
-                              Add your first secret
-                            </button>
-                          </div>
+                          <Card colorTheme={2} pattern="dots" className="py-20 text-center border-dashed border-8 flex flex-col items-center gap-6">
+                            <Key className="h-20 w-20 text-[var(--color-max-accent-1)]" />
+                            <h4 className="text-4xl font-black uppercase text-shadow-single">NO SECRETS HERE 🙈</h4>
+                            <Button colorTheme={3} onClick={() => setShowAddSecret(true)}>ADD ONE NOW!</Button>
+                          </Card>
                         ) : (
-                          <div className="flex flex-col gap-2.5">
-                            {secrets.map((secret) => {
+                          <div className="flex flex-col gap-6">
+                            {secrets.map((secret, i) => {
+                              const theme = getAccentColor(i);
                               const isRevealed = revealedSecrets[secret.id];
                               const decData = decryptedSecrets[secret.cid];
 
                               return (
-                                <div 
-                                  key={secret.id}
-                                  className="p-4 rounded-xl border border-zinc-800/80 bg-zinc-900/10 flex flex-col md:flex-row md:items-center justify-between gap-4"
-                                >
-                                  {/* Secret Details */}
-                                  <div className="flex items-center gap-3">
-                                    <div className="h-8 w-8 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-center">
-                                      <FileText className="h-4 w-4 text-zinc-400" />
+                                <Card key={secret.id} colorTheme={theme} asymmetric={i % 2 === 0 ? 'rotate-left' : 'rotate-right'} className="p-6 md:p-8 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+                                  <div className="flex items-center gap-6">
+                                    <div className="h-16 w-16 rounded-2xl bg-black/40 border-4 border-current flex items-center justify-center" style={{ color: `var(--color-max-accent-${theme})` }}>
+                                      <FileText className="h-8 w-8 text-white" />
                                     </div>
-                                    <div className="text-left">
-                                      <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-bold font-mono">
-                                        {secret.secretType}
-                                      </span>
-                                      <h4 className="text-sm font-bold text-white mt-0.5">
+                                    <div>
+                                      <span className="text-lg font-bold text-white/70 uppercase tracking-widest">{secret.secretType}</span>
+                                      <h4 className="text-3xl font-black uppercase mt-1">
                                         {isRevealed && decData ? decData.name : '••••••••••••'}
                                       </h4>
                                     </div>
                                   </div>
 
-                                  {/* Encrypted content area */}
                                   {isRevealed && decData && (
-                                    <div className="flex-1 max-w-md bg-zinc-950 px-3.5 py-1.5 rounded-lg border border-zinc-800/80 font-mono text-xs flex items-center justify-between text-left">
-                                      <span className="text-zinc-300 break-all">{decData.value}</span>
-                                      <button 
-                                        onClick={() => copyToClipboard(decData.value, secret.id)}
-                                        className="text-zinc-500 hover:text-zinc-300 ml-2"
-                                      >
-                                        {copiedText === secret.id ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+                                    <div className="flex-1 w-full md:w-auto md:mx-6 bg-black p-4 rounded-xl border-4 border-dashed border-white/40 flex items-center justify-between shadow-inner">
+                                      <span className="text-xl font-mono text-[var(--color-max-accent-2)] font-bold break-all">{decData.value}</span>
+                                      <button onClick={() => copyToClipboard(decData.value, secret.id)} className="ml-4 p-2 bg-white/10 hover:bg-white/20 rounded-lg transition">
+                                        {copiedText === secret.id ? <Check className="h-6 w-6 text-[var(--color-max-accent-3)]" /> : <Copy className="h-6 w-6 text-white" />}
                                       </button>
                                     </div>
                                   )}
 
-                                  {/* Actions */}
-                                  <div className="flex items-center gap-2 self-end md:self-auto">
-                                    <button 
-                                      onClick={() => handleDecryptSecret(secret.id, secret.cid, secret.encryptedName)}
-                                      className="p-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-white transition"
-                                      title={isRevealed ? "Hide Secret" : "Reveal Secret"}
-                                    >
-                                      {isRevealed ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                                    </button>
-                                    <button 
-                                      onClick={() => handleDeleteSecret(secret.id)}
-                                      className="p-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-rose-400 transition"
-                                      title="Delete"
-                                    >
-                                      <Trash2 className="h-4 w-4" />
-                                    </button>
+                                  <div className="flex gap-4 w-full md:w-auto">
+                                    <Button colorTheme={2} variant="outline" className="flex-1 md:w-auto px-4 py-2 h-14" onClick={() => handleDecryptSecret(secret.id, secret.cid, secret.encryptedName)}>
+                                      {isRevealed ? <EyeOff className="h-6 w-6" /> : <Eye className="h-6 w-6" />}
+                                    </Button>
+                                    <Button colorTheme={4} variant="primary" className="flex-1 md:w-auto px-4 py-2 h-14 !bg-rose-500 !border-rose-300" onClick={() => handleDeleteSecret(secret.id)}>
+                                      <Trash2 className="h-6 w-6" />
+                                    </Button>
                                   </div>
-                                </div>
+                                </Card>
                               )
                             })}
                           </div>
@@ -900,220 +776,179 @@ export default function App() {
             )}
 
             {activeTab === 'activity' && (
-              <div className="max-w-3xl flex flex-col gap-4">
-                <div>
-                  <h2 className="text-xl font-bold tracking-tight text-white">Activity Log</h2>
-                  <p className="text-xs text-zinc-400">Decentralized logs of your smart account updates.</p>
-                </div>
-                <div className="border border-zinc-800 rounded-xl overflow-hidden divide-y divide-zinc-900 bg-zinc-950/20">
-                  <div className="p-4 flex items-start gap-3">
-                    <span className="h-2 w-2 rounded-full bg-emerald-500 mt-1.5"></span>
-                    <div className="text-left">
-                      <p className="text-xs font-bold text-white">Secret Registry Created</p>
-                      <p className="text-[10px] text-zinc-400 mt-0.5 font-mono">Tx: 0x7a83b...c382</p>
+              <div className="max-w-4xl mx-auto flex flex-col gap-8">
+                <h2 className="text-6xl font-black uppercase text-shadow-mega mb-4">ACTIVITY LOG 📈</h2>
+                <Card colorTheme={4} pattern="stripes" className="flex flex-col gap-4">
+                  <div className="p-6 border-b-4 border-dashed border-[var(--color-max-accent-4)] flex items-center gap-6">
+                    <span className="h-6 w-6 rounded-full bg-[var(--color-max-accent-2)] shadow-glow-base flex-shrink-0"></span>
+                    <div>
+                      <p className="text-2xl font-bold uppercase">Secret Registry Created</p>
+                      <p className="text-lg font-mono text-[var(--color-max-accent-3)]">Tx: 0x7a83b...c382</p>
                     </div>
                   </div>
-                  <div className="p-4 flex items-start gap-3">
-                    <span className="h-2 w-2 rounded-full bg-zinc-600 mt-1.5"></span>
-                    <div className="text-left">
-                      <p className="text-xs font-bold text-white">Smart Account Initialized</p>
-                      <p className="text-[10px] text-zinc-400 mt-0.5 font-mono">Gas sponsored by Pimlico Paymaster</p>
+                  <div className="p-6 flex items-center gap-6">
+                    <span className="h-6 w-6 rounded-full bg-[var(--color-max-accent-5)] shadow-glow-base flex-shrink-0"></span>
+                    <div>
+                      <p className="text-2xl font-bold uppercase">Smart Account Initialized</p>
+                      <p className="text-lg font-mono text-[var(--color-max-accent-3)]">Gas sponsored by Pimlico Paymaster</p>
                     </div>
                   </div>
-                </div>
+                </Card>
               </div>
             )}
 
             {activeTab === 'settings' && (
-              <div className="max-w-2xl flex flex-col gap-6">
-                <div>
-                  <h2 className="text-xl font-bold tracking-tight text-white">Settings</h2>
-                  <p className="text-xs text-zinc-400">Configure your security and credential settings.</p>
-                </div>
-                <div className="p-5 border border-zinc-800 rounded-xl bg-zinc-900/10 flex flex-col gap-4">
-                  <h3 className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Developer API</h3>
-                  <div className="flex flex-col gap-1">
-                    <span className="text-[10px] text-zinc-500 font-semibold">Vault Registry Contract</span>
-                    <div className="p-2 rounded bg-zinc-950 font-mono text-[10px] border border-zinc-900 flex justify-between items-center">
-                      <span>{VAULT_REGISTRY_ADDRESS}</span>
-                      <button onClick={() => copyToClipboard(VAULT_REGISTRY_ADDRESS, 'c1')} className="text-zinc-500 hover:text-zinc-300">
-                        {copiedText === 'c1' ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+              <div className="max-w-4xl mx-auto flex flex-col gap-8">
+                <h2 className="text-6xl font-black uppercase text-shadow-mega mb-4">SETTINGS ⚙️</h2>
+                <Card colorTheme={1} pattern="checker" className="flex flex-col gap-8 p-10">
+                  <CardHeader colorTheme={1}>
+                    <CardTitle>DEVELOPER API INFO</CardTitle>
+                  </CardHeader>
+                  <div className="flex flex-col gap-2">
+                    <label className="text-xl font-bold text-[var(--color-max-accent-1)] uppercase">Vault Registry Contract</label>
+                    <div className="flex items-center justify-between bg-black p-4 border-4 border-[var(--color-max-accent-2)] rounded-xl font-mono text-lg">
+                      <span className="truncate mr-4">{VAULT_REGISTRY_ADDRESS}</span>
+                      <button onClick={() => copyToClipboard(VAULT_REGISTRY_ADDRESS, 'c1')} className="p-2 bg-white/10 hover:bg-white/20 rounded-lg">
+                        {copiedText === 'c1' ? <Check className="h-5 w-5 text-[var(--color-max-accent-3)]" /> : <Copy className="h-5 w-5" />}
                       </button>
                     </div>
                   </div>
-                  <div className="flex flex-col gap-1">
-                    <span className="text-[10px] text-zinc-500 font-semibold">Secret Registry Contract</span>
-                    <div className="p-2 rounded bg-zinc-950 font-mono text-[10px] border border-zinc-900 flex justify-between items-center">
-                      <span>{SECRET_REGISTRY_ADDRESS}</span>
-                      <button onClick={() => copyToClipboard(SECRET_REGISTRY_ADDRESS, 'c2')} className="text-zinc-500 hover:text-zinc-300">
-                        {copiedText === 'c2' ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+                  <div className="flex flex-col gap-2">
+                    <label className="text-xl font-bold text-[var(--color-max-accent-1)] uppercase">Secret Registry Contract</label>
+                    <div className="flex items-center justify-between bg-black p-4 border-4 border-[var(--color-max-accent-3)] rounded-xl font-mono text-lg">
+                      <span className="truncate mr-4">{SECRET_REGISTRY_ADDRESS}</span>
+                      <button onClick={() => copyToClipboard(SECRET_REGISTRY_ADDRESS, 'c2')} className="p-2 bg-white/10 hover:bg-white/20 rounded-lg">
+                        {copiedText === 'c2' ? <Check className="h-5 w-5 text-[var(--color-max-accent-2)]" /> : <Copy className="h-5 w-5" />}
                       </button>
                     </div>
                   </div>
-                </div>
+                </Card>
               </div>
             )}
           </main>
         </div>
       )}
 
-      {/* --- MODALS --- */}
-
-      {/* Create Vault Modal */}
+      {/* MODALS */}
       {showCreateVault && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-md glass border border-zinc-800 rounded-xl p-6 shadow-2xl flex flex-col gap-4 text-left">
-            <h3 className="text-base font-bold text-white">Create New Vault</h3>
-            <form onSubmit={handleCreateVault} className="flex flex-col gap-3">
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Vault Name</label>
-                <input 
-                  type="text" 
-                  value={vaultName}
-                  onChange={(e) => setVaultName(e.target.value)}
-                  className="px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-semibold text-white focus:outline-none focus:border-zinc-600"
-                  placeholder="Production, API Keys, SSH etc."
-                  required
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Description</label>
+        <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center p-6">
+          <Card colorTheme={3} asymmetric="none" className="w-full max-w-xl shadow-hard-triple scale-100">
+            <h3 className="text-4xl font-black uppercase text-shadow-single mb-8">CREATE NEW VAULT 🚀</h3>
+            <form onSubmit={handleCreateVault} className="flex flex-col gap-6">
+              <Input 
+                label="Vault Name" 
+                colorTheme={1} 
+                value={vaultName} 
+                onChange={e => setVaultName(e.target.value)} 
+                placeholder="SUPER SECRET STUFF" 
+                required 
+              />
+              <div className="flex flex-col gap-2 relative">
+                <label className="font-display text-xl uppercase tracking-wider -rotate-1 origin-left ml-2 text-[var(--color-max-accent-2)]">
+                  Description
+                </label>
                 <textarea 
                   value={vaultDesc}
                   onChange={(e) => setVaultDesc(e.target.value)}
-                  className="px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-semibold text-white focus:outline-none focus:border-zinc-600 h-20"
-                  placeholder="Primary secure vault for client-facing secrets."
+                  className="w-full bg-[var(--color-max-muted)]/50 backdrop-blur-sm border-4 border-[var(--color-max-accent-2)] rounded-2xl px-6 py-4 text-lg font-bold text-white placeholder:text-white/40 focus:outline-none focus:bg-[var(--color-max-muted)] focus:ring-4 focus:ring-offset-2 focus:ring-[#00F5D4]/30 focus:ring-offset-[#FFE600] min-h-[120px]"
+                  placeholder="Primary vault for production..."
                 />
               </div>
-              <div className="flex items-center justify-end gap-2 mt-2">
-                <button 
-                  type="button" 
-                  onClick={() => setShowCreateVault(false)}
-                  className="py-1.5 px-3 rounded-md bg-zinc-900 border border-zinc-800 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 transition"
-                >
-                  Cancel
-                </button>
-                <button 
-                  type="submit" 
-                  disabled={isCreatingVault}
-                  className="py-1.5 px-3 rounded-md bg-zinc-100 hover:bg-zinc-200 text-zinc-950 text-xs font-bold transition flex items-center gap-1.5"
-                >
-                  {isCreatingVault ? <RefreshCw className="h-3 w-3 animate-spin" /> : null}
-                  Create
-                </button>
+              <div className="flex items-center justify-end gap-4 mt-6">
+                <Button type="button" variant="ghost" onClick={() => setShowCreateVault(false)}>CANCEL</Button>
+                <Button type="submit" colorTheme={3} disabled={isCreatingVault}>
+                  {isCreatingVault ? <RefreshCw className="h-6 w-6 animate-spin mr-2" /> : <Plus className="h-6 w-6 mr-2" />}
+                  CREATE VAULT
+                </Button>
               </div>
             </form>
-          </div>
+          </Card>
         </div>
       )}
 
-      {/* Add Secret Modal */}
       {showAddSecret && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-md glass border border-zinc-800 rounded-xl p-6 shadow-2xl flex flex-col gap-4 text-left">
-            <h3 className="text-base font-bold text-white">Add New Secret</h3>
-            <form onSubmit={handleAddSecret} className="flex flex-col gap-3">
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Secret Type</label>
+        <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center p-6 overflow-y-auto">
+          <Card colorTheme={1} asymmetric="none" pattern="dots" className="w-full max-w-xl my-8">
+            <h3 className="text-4xl font-black uppercase text-shadow-single mb-8">ADD SECRET 🤫</h3>
+            <form onSubmit={handleAddSecret} className="flex flex-col gap-6">
+              <div className="flex flex-col gap-2">
+                <label className="font-display text-xl uppercase tracking-wider rotate-1 origin-left ml-2 text-[var(--color-max-accent-5)]">Secret Type</label>
                 <select 
                   value={secretType}
                   onChange={(e) => setSecretType(e.target.value)}
-                  className="px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-semibold text-white focus:outline-none focus:border-zinc-600"
+                  className="w-full bg-[var(--color-max-muted)]/50 backdrop-blur-sm border-4 border-[var(--color-max-accent-5)] rounded-full px-6 py-4 text-lg font-bold text-white focus:outline-none focus:bg-[var(--color-max-muted)] focus:ring-4 focus:ring-offset-2 focus:ring-[#7B2FFF]/30 focus:ring-offset-[#FF3AF2]"
                 >
-                  <option value="api-key">API Key</option>
-                  <option value="env-file">Environment Variable</option>
-                  <option value="ssh-key">SSH Key</option>
-                  <option value="password">Password</option>
+                  <option value="api-key" className="bg-black">API Key</option>
+                  <option value="env-file" className="bg-black">Environment Variable</option>
+                  <option value="ssh-key" className="bg-black">SSH Key</option>
+                  <option value="password" className="bg-black">Password</option>
                 </select>
               </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Secret Label</label>
-                <input 
-                  type="text" 
-                  value={secretName}
-                  onChange={(e) => setSecretName(e.target.value)}
-                  className="px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-semibold text-white focus:outline-none focus:border-zinc-600"
-                  placeholder="STRIPE_LIVE_KEY"
-                  required
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Secret Value</label>
+              <Input 
+                label="Secret Label" 
+                colorTheme={2} 
+                value={secretName} 
+                onChange={e => setSecretName(e.target.value)} 
+                placeholder="STRIPE_LIVE_KEY" 
+                required 
+              />
+              <div className="flex flex-col gap-2 relative">
+                <label className="font-display text-xl uppercase tracking-wider -rotate-1 origin-left ml-2 text-[var(--color-max-accent-4)]">
+                  Secret Value
+                </label>
                 <textarea 
                   value={secretVal}
                   onChange={(e) => setSecretVal(e.target.value)}
-                  className="px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-semibold text-white focus:outline-none focus:border-zinc-600 h-24"
+                  className="w-full bg-[var(--color-max-muted)]/50 backdrop-blur-sm border-4 border-[var(--color-max-accent-4)] rounded-2xl px-6 py-4 text-lg font-bold text-white placeholder:text-white/40 focus:outline-none focus:bg-[var(--color-max-muted)] focus:ring-4 focus:ring-offset-2 focus:ring-[#FF6B35]/30 focus:ring-offset-[#7B2FFF] min-h-[120px]"
                   placeholder="sk_live_..."
                   required
                 />
               </div>
-              <div className="flex items-center justify-end gap-2 mt-2">
-                <button 
-                  type="button" 
-                  onClick={() => setShowAddSecret(false)}
-                  className="py-1.5 px-3 rounded-md bg-zinc-900 border border-zinc-800 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 transition"
-                >
-                  Cancel
-                </button>
-                <button 
-                  type="submit" 
-                  disabled={isAddingSecret}
-                  className="py-1.5 px-3 rounded-md bg-zinc-100 hover:bg-zinc-200 text-zinc-950 text-xs font-bold transition flex items-center gap-1.5"
-                >
-                  {isAddingSecret ? <RefreshCw className="h-3 w-3 animate-spin" /> : null}
-                  Add Secret
-                </button>
+              <div className="flex items-center justify-end gap-4 mt-6">
+                <Button type="button" variant="ghost" onClick={() => setShowAddSecret(false)}>CANCEL</Button>
+                <Button type="submit" colorTheme={1} disabled={isAddingSecret}>
+                  {isAddingSecret ? <RefreshCw className="h-6 w-6 animate-spin mr-2" /> : <Plus className="h-6 w-6 mr-2" />}
+                  ADD TO VAULT
+                </Button>
               </div>
             </form>
-          </div>
+          </Card>
         </div>
       )}
 
-      {/* Share Vault Modal */}
       {showShareModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-md glass border border-zinc-800 rounded-xl p-6 shadow-2xl flex flex-col gap-4 text-left">
-            <h3 className="text-base font-bold text-white">Share Vault Access</h3>
-            <form onSubmit={handleShareVault} className="flex flex-col gap-3">
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Recipient Smart Account Address</label>
-                <input 
-                  type="text" 
-                  value={shareUserAddress}
-                  onChange={(e) => setShareUserAddress(e.target.value)}
-                  className="px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-semibold text-white focus:outline-none focus:border-zinc-600 font-mono"
-                  placeholder="0x..."
-                  required
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Permission Level</label>
+        <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center p-6">
+          <Card colorTheme={4} asymmetric="none" className="w-full max-w-xl">
+            <h3 className="text-4xl font-black uppercase text-shadow-single mb-8">SHARE VAULT 🤝</h3>
+            <form onSubmit={handleShareVault} className="flex flex-col gap-6">
+              <Input 
+                label="Recipient Address" 
+                colorTheme={3} 
+                value={shareUserAddress} 
+                onChange={e => setShareUserAddress(e.target.value)} 
+                placeholder="0x..." 
+                className="font-mono"
+                required 
+              />
+              <div className="flex flex-col gap-2">
+                <label className="font-display text-xl uppercase tracking-wider rotate-1 origin-left ml-2 text-[var(--color-max-accent-5)]">Permission Level</label>
                 <select 
                   value={sharePermissionLevel}
                   onChange={(e) => setSharePermissionLevel(e.target.value)}
-                  className="px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-semibold text-white focus:outline-none focus:border-zinc-600"
+                  className="w-full bg-[var(--color-max-muted)]/50 backdrop-blur-sm border-4 border-[var(--color-max-accent-5)] rounded-full px-6 py-4 text-lg font-bold text-white focus:outline-none focus:bg-[var(--color-max-muted)] focus:ring-4 focus:ring-offset-2 focus:ring-[#7B2FFF]/30 focus:ring-offset-[#FF3AF2]"
                 >
-                  <option value="1">Read-Only</option>
-                  <option value="2">Read & Write</option>
+                  <option value="1" className="bg-black">Read-Only</option>
+                  <option value="2" className="bg-black">Read & Write</option>
                 </select>
               </div>
-              <div className="flex items-center justify-end gap-2 mt-2">
-                <button 
-                  type="button" 
-                  onClick={() => setShowShareModal(false)}
-                  className="py-1.5 px-3 rounded-md bg-zinc-900 border border-zinc-800 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 transition"
-                >
-                  Cancel
-                </button>
-                <button 
-                  type="submit" 
-                  className="py-1.5 px-3 rounded-md bg-zinc-100 hover:bg-zinc-200 text-zinc-950 text-xs font-bold transition"
-                >
-                  Share Vault
-                </button>
+              <div className="flex items-center justify-end gap-4 mt-6">
+                <Button type="button" variant="ghost" onClick={() => setShowShareModal(false)}>CANCEL</Button>
+                <Button type="submit" colorTheme={4}>
+                  SHARE VAULT
+                </Button>
               </div>
             </form>
-          </div>
+          </Card>
         </div>
       )}
     </div>
