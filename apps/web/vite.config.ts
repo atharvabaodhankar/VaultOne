@@ -12,6 +12,14 @@ export default defineConfig({
   define: {
     global: 'globalThis', // required for viem
   },
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8788',
+        changeOrigin: true,
+      }
+    }
+  },
   resolve: {
     alias: {
       '@noble/curves/nist.js': '@noble/curves/nist', // required for permissionless

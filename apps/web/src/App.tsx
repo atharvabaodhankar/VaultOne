@@ -212,6 +212,35 @@ export default function App() {
     }
   }, [secretIds, selectedVaultId, wallet.address])
 
+  // Background decrypt secret labels once vault is unlocked
+  useEffect(() => {
+    if (!masterKey || secrets.length === 0) return
+
+    const decryptAllLabels = async () => {
+      for (const secret of secrets) {
+        if (decryptedSecrets[secret.cid]) continue
+        
+        try {
+          const response = await fetch(`https://gateway.pinata.cloud/ipfs/${secret.cid}`)
+          if (!response.ok) continue
+          const payload = await response.json()
+          const secretKey = await decryptText(payload.encryptedKey, payload.keyIv, masterKey)
+          const decName = await decryptText(secret.encryptedName, payload.nameIv, secretKey)
+          const decVal = await decryptText(payload.ciphertext, payload.iv, secretKey)
+          
+          setDecryptedSecrets(prev => ({
+            ...prev,
+            [secret.cid]: { name: decName, value: decVal }
+          }))
+        } catch (err) {
+          console.error("Background decryption failed for secret:", secret.id, err)
+        }
+      }
+    }
+
+    decryptAllLabels()
+  }, [secrets, masterKey])
+
   const handleUnlockVault = async () => {
     setIsUnlocking(true)
     setErrorMessage(null)
@@ -741,7 +770,7 @@ export default function App() {
                                     <div>
                                       <span className="text-lg font-bold text-white/70 uppercase tracking-widest">{secret.secretType}</span>
                                       <h4 className="text-3xl font-black uppercase mt-1">
-                                        {isRevealed && decData ? decData.name : '••••••••••••'}
+                                        {decData ? decData.name : '••••••••••••'}
                                       </h4>
                                     </div>
                                   </div>

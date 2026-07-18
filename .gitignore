@@ -21,3 +21,6 @@ cache/
 dist/
 build/
 out/
+
+# Cloudflare Wrangler dev files
+.wrangler/
