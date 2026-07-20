@@ -109,6 +109,9 @@ export default function App() {
   const [shareUserAddress, setShareUserAddress] = useState('')
   const [sharePermissionLevel, setSharePermissionLevel] = useState('1')
   const [showShareModal, setShowShareModal] = useState(false)
+  const [vaultSubTab, setVaultSubTab] = useState<'secrets' | 'access'>('secrets')
+  const [sharedUsers, setSharedUsers] = useState<{ address: string; level: number }[]>([])
+  const [loadingSharedUsers, setLoadingSharedUsers] = useState(false)
 
   const tx = useTransaction()
 
@@ -522,10 +525,80 @@ export default function App() {
       })
       setShareUserAddress('')
       setShowShareModal(false)
+      retryRefetch(fetchSharedUsers)
     } catch (err) {
       console.error("Sharing failed:", err)
     }
   }
+
+  const fetchSharedUsers = async () => {
+    if (!selectedVaultId) return
+    setLoadingSharedUsers(true)
+    try {
+      const logs = await publicClient.getLogs({
+        address: PERMISSION_MANAGER_ADDRESS,
+        event: {
+          type: 'event',
+          name: 'PermissionGranted',
+          inputs: [
+            { indexed: true, name: 'vaultId', type: 'bytes32' },
+            { indexed: true, name: 'user', type: 'address' },
+            { indexed: false, name: 'level', type: 'uint8' },
+            { indexed: true, name: 'grantor', type: 'address' }
+          ]
+        },
+        args: {
+          vaultId: selectedVaultId
+        },
+        fromBlock: 0n
+      })
+
+      const userAddresses = Array.from(new Set(logs.map(log => log.args.user as string)))
+      const usersWithPermissions = []
+      
+      for (const userAddress of userAddresses) {
+        if (!userAddress) continue
+        const level = await publicClient.readContract({
+          address: PERMISSION_MANAGER_ADDRESS,
+          abi: PERMISSION_MANAGER_ABI,
+          functionName: 'getPermissionLevel',
+          args: [selectedVaultId, userAddress as `0x${string}`]
+        }) as number
+        
+        if (level > 0) {
+          usersWithPermissions.push({ address: userAddress, level })
+        }
+      }
+      setSharedUsers(usersWithPermissions)
+    } catch (err) {
+      console.error("Failed to fetch shared users:", err)
+    } finally {
+      setLoadingSharedUsers(false)
+    }
+  }
+
+  const handleRevokePermission = async (userAddress: string) => {
+    if (!selectedVaultId) return
+    setErrorMessage(null)
+    try {
+      await safeSend({
+        to: PERMISSION_MANAGER_ADDRESS,
+        abi: PERMISSION_MANAGER_ABI,
+        functionName: 'revokePermission',
+        args: [selectedVaultId, userAddress as `0x${string}`]
+      })
+      retryRefetch(fetchSharedUsers)
+    } catch (err: any) {
+      console.error("Revoke permission failed:", err)
+      setErrorMessage(err.message || "Failed to revoke permission.")
+    }
+  }
+
+  useEffect(() => {
+    if (selectedVaultId && vaultSubTab === 'access') {
+      fetchSharedUsers()
+    }
+  }, [selectedVaultId, vaultSubTab])
 
   // Check for passkey on mount
   useEffect(() => {
@@ -670,7 +743,7 @@ export default function App() {
               <Button 
                 variant={activeTab === 'dashboard' ? 'primary' : 'ghost'} 
                 colorTheme={3}
-                onClick={() => { setActiveTab('dashboard'); setSelectedVaultId(null); }}
+                onClick={() => { setActiveTab('dashboard'); setSelectedVaultId(null); setVaultSubTab('secrets'); }}
                 className={cn("w-full justify-start py-4", activeTab === 'dashboard' && 'rotate-1')}
               >
                 <Folder className="h-5 w-5 mr-3" /> VAULTS
@@ -810,7 +883,7 @@ export default function App() {
                   <div className="flex flex-col gap-10 max-w-5xl mx-auto">
                     {/* Breadcrumbs */}
                     <div className="flex items-center gap-4 text-xl font-bold uppercase">
-                      <Button variant="ghost" className="px-4 py-2 h-auto text-xl" onClick={() => setSelectedVaultId(null)}>← BACK</Button>
+                      <Button variant="ghost" className="px-4 py-2 h-auto text-xl" onClick={() => { setSelectedVaultId(null); setVaultSubTab('secrets'); }}>← BACK</Button>
                     </div>
 
                     {/* Vault Header */}
@@ -837,118 +910,203 @@ export default function App() {
                       </div>
                     </Card>
 
-                    {/* Unlock Status */}
-                    {!masterKey ? (
-                      <Card colorTheme={3} asymmetric="rotate-right" className="text-center py-16 flex flex-col items-center justify-center gap-8">
-                        <Lock className="h-20 w-20 text-[var(--color-max-accent-1)] animate-wiggle" />
-                        <h3 className="text-5xl font-black uppercase text-shadow-double">UNLOCK REQUIRED 🛑</h3>
-                        <p className="text-2xl font-bold text-white/90 max-w-2xl">
-                          Decrypt your master key locally to access secrets.
-                        </p>
-                        
-                        <div className="flex flex-col items-center justify-center gap-6 w-full mt-6">
-                          <div className="w-full flex justify-center">
-                            <Button colorTheme={1} size="large" onClick={handleUnlockVault} disabled={isUnlocking} className="w-full max-w-md">
-                              {isUnlocking ? <RefreshCw className="h-6 w-6 animate-spin mr-2" /> : <Unlock className="h-6 w-6 mr-2" />}
-                              SIGN & BIOMETRIC UNLOCK ⚡
-                            </Button>
-                          </div>
-                          
-                          <div className="text-2xl font-black italic">OR USE PASSWORD + SCAN</div>
+                    {/* Sub Tab Navigation */}
+                    {vaults.find(v => v.id === selectedVaultId)?.owner.toLowerCase() === wallet.address?.toLowerCase() && (
+                      <div className="flex gap-4 border-b-4 border-[var(--color-max-accent-2)] pb-2 mt-4">
+                        <button 
+                          onClick={() => setVaultSubTab('secrets')} 
+                          className={cn("px-6 py-2 font-display text-xl uppercase tracking-wider border-4 rounded-xl transition", 
+                            vaultSubTab === 'secrets' 
+                              ? "bg-[var(--color-max-accent-1)] text-black border-black shadow-[4px_4px_0_#000]" 
+                              : "bg-[var(--color-max-muted)] text-white border-transparent hover:border-[var(--color-max-accent-1)]")}
+                        >
+                          Secrets 🤫
+                        </button>
+                        <button 
+                          onClick={() => setVaultSubTab('access')} 
+                          className={cn("px-6 py-2 font-display text-xl uppercase tracking-wider border-4 rounded-xl transition", 
+                            vaultSubTab === 'access' 
+                              ? "bg-[var(--color-max-accent-2)] text-black border-black shadow-[4px_4px_0_#000]" 
+                              : "bg-[var(--color-max-muted)] text-white border-transparent hover:border-[var(--color-max-accent-2)]")}
+                        >
+                          Access Management 👥
+                        </button>
+                      </div>
+                    )}
 
-                          <form onSubmit={handlePasswordUnlock} className="flex gap-4 w-full max-w-md">
-                            <Input 
-                              type="password" 
-                              colorTheme={4} 
-                              value={unlockPassword}
-                              onChange={(e) => setUnlockPassword(e.target.value)}
-                              placeholder="Local Password"
-                              required
-                              className="flex-1"
-                            />
-                            <Button type="submit" colorTheme={4} disabled={isUnlocking}>
-                              GO ⚡
-                            </Button>
-                          </form>
-                        </div>
-                      </Card>
-                    ) : (
-                      // Secrets List
+                    {vaultSubTab === 'secrets' && (
+                      <>
+                        {/* Unlock Status */}
+                        {!masterKey ? (
+                          <Card colorTheme={3} asymmetric="rotate-right" className="text-center py-16 flex flex-col items-center justify-center gap-8">
+                            <Lock className="h-20 w-20 text-[var(--color-max-accent-1)] animate-wiggle" />
+                            <h3 className="text-5xl font-black uppercase text-shadow-double">UNLOCK REQUIRED 🛑</h3>
+                            <p className="text-2xl font-bold text-white/90 max-w-2xl">
+                              Decrypt your master key locally to access secrets.
+                            </p>
+                            
+                            <div className="flex flex-col items-center justify-center gap-6 w-full mt-6">
+                              <div className="w-full flex justify-center">
+                                <Button colorTheme={1} size="large" onClick={handleUnlockVault} disabled={isUnlocking} className="w-full max-w-md">
+                                  {isUnlocking ? <RefreshCw className="h-6 w-6 animate-spin mr-2" /> : <Unlock className="h-6 w-6 mr-2" />}
+                                  SIGN & BIOMETRIC UNLOCK ⚡
+                                </Button>
+                              </div>
+                              
+                              <div className="text-2xl font-black italic">OR USE PASSWORD + SCAN</div>
+
+                              <form onSubmit={handlePasswordUnlock} className="flex gap-4 w-full max-w-md">
+                                <Input 
+                                  type="password" 
+                                  colorTheme={4} 
+                                  value={unlockPassword}
+                                  onChange={(e) => setUnlockPassword(e.target.value)}
+                                  placeholder="Local Password"
+                                  required
+                                  className="flex-1"
+                                />
+                                <Button type="submit" colorTheme={4} disabled={isUnlocking}>
+                                  GO ⚡
+                                </Button>
+                              </form>
+                            </div>
+                          </Card>
+                        ) : (
+                          // Secrets List
+                          <div className="flex flex-col gap-8">
+                            <h3 className="text-4xl font-black uppercase text-shadow-single flex items-center justify-between">
+                              <span>SECRETS 🤫</span>
+                              <span className="text-2xl bg-[var(--color-max-accent-5)] px-4 py-1 rounded-full border-4 border-black">
+                                {loadingSecrets ? 'REFRESHING...' : `${secrets.length} ITEMS`}
+                              </span>
+                            </h3>
+
+                            {loadingSecrets ? (
+                              <div className="py-20 flex justify-center">
+                                <RefreshCw className="h-16 w-16 animate-spin text-[var(--color-max-accent-2)]" />
+                              </div>
+                            ) : secrets.length === 0 ? (
+                              <Card colorTheme={2} pattern="dots" className="py-20 text-center border-dashed border-8 flex flex-col items-center gap-6">
+                                <Key className="h-20 w-20 text-[var(--color-max-accent-1)]" />
+                                <h4 className="text-4xl font-black uppercase text-shadow-single">NO SECRETS HERE 🙈</h4>
+                                <Button colorTheme={3} onClick={() => setShowAddSecret(true)}>ADD ONE NOW!</Button>
+                              </Card>
+                            ) : (
+                              <div className="flex flex-col gap-6">
+                                {secrets.map((secret, i) => {
+                                  const theme = getAccentColor(i);
+                                  const isRevealed = revealedSecrets[secret.id];
+                                  const decData = decryptedSecrets[secret.cid];
+
+                                  return (
+                                    <Card key={secret.id} colorTheme={theme} asymmetric={i % 2 === 0 ? 'rotate-left' : 'rotate-right'} className="p-6 md:p-8 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+                                      <div className="flex items-center gap-6">
+                                        <div className="h-16 w-16 rounded-2xl bg-black/40 border-4 border-current flex items-center justify-center" style={{ color: `var(--color-max-accent-${theme})` }}>
+                                          <FileText className="h-8 w-8 text-white" />
+                                        </div>
+                                        <div>
+                                          <span className="text-lg font-bold text-white/70 uppercase tracking-widest">{secret.secretType}</span>
+                                          <h4 className="text-3xl font-black uppercase mt-1">
+                                            {decData ? decData.name : '••••••••••••'}
+                                          </h4>
+                                        </div>
+                                      </div>
+
+                                      {decData && (
+                                         <div className="flex-1 w-full md:w-auto md:mx-6 bg-black p-4 rounded-xl border-4 border-dashed border-white/40 flex items-center justify-between shadow-inner">
+                                           {secret.secretType === 'file' ? (
+                                             <>
+                                               <span className="text-xl font-mono text-[var(--color-max-accent-2)] font-bold break-all truncate max-w-xs">
+                                                 {isRevealed ? "DECRYPTED FILE READY" : "••••••••••••••••"}
+                                               </span>
+                                               {isRevealed && (
+                                                 <Button 
+                                                   colorTheme={3} 
+                                                   onClick={() => downloadDecryptedFile(decData.value, decData.name)}
+                                                   className="h-10 py-1 px-4 text-xs ml-4 rounded-full shadow-[2px_2px_0_var(--color-max-accent-3)]"
+                                                 >
+                                                   DOWNLOAD 💾
+                                                 </Button>
+                                               )}
+                                             </>
+                                           ) : (
+                                             <>
+                                               <span className="text-xl font-mono text-[var(--color-max-accent-2)] font-bold break-all">
+                                                 {isRevealed ? decData.value : '••••••••••••••••'}
+                                               </span>
+                                               <button onClick={() => copyToClipboard(decData.value, secret.id)} className="ml-4 p-2 bg-white/10 hover:bg-white/20 rounded-lg transition">
+                                                 {copiedText === secret.id ? <Check className="h-6 w-6 text-[var(--color-max-accent-3)]" /> : <Copy className="h-6 w-6 text-white" />}
+                                               </button>
+                                             </>
+                                           )}
+                                         </div>
+                                       )}
+
+                                      <div className="flex gap-4 w-full md:w-auto">
+                                        <Button colorTheme={2} variant="outline" className="flex-1 md:w-auto px-4 py-2 h-14" onClick={() => handleDecryptSecret(secret.id, secret.cid, secret.encryptedName)}>
+                                          {isRevealed ? <EyeOff className="h-6 w-6" /> : <Eye className="h-6 w-6" />}
+                                        </Button>
+                                        <Button colorTheme={4} variant="primary" className="flex-1 md:w-auto px-4 py-2 h-14 !bg-rose-500 !border-rose-300" onClick={() => handleDeleteSecret(secret.id)}>
+                                          <Trash2 className="h-6 w-6" />
+                                        </Button>
+                                      </div>
+                                    </Card>
+                                  )
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    {vaultSubTab === 'access' && (
                       <div className="flex flex-col gap-8">
                         <h3 className="text-4xl font-black uppercase text-shadow-single flex items-center justify-between">
-                          <span>SECRETS 🤫</span>
-                          <span className="text-2xl bg-[var(--color-max-accent-5)] px-4 py-1 rounded-full border-4 border-black">
-                            {loadingSecrets ? 'REFRESHING...' : `${secrets.length} ITEMS`}
+                          <span>Shared Access List 👥</span>
+                          <span className="text-2xl bg-[var(--color-max-accent-2)] px-4 py-1 rounded-full border-4 border-black">
+                            {loadingSharedUsers ? 'REFRESHING...' : `${sharedUsers.length} USERS`}
                           </span>
                         </h3>
 
-                        {loadingSecrets ? (
+                        {loadingSharedUsers ? (
                           <div className="py-20 flex justify-center">
                             <RefreshCw className="h-16 w-16 animate-spin text-[var(--color-max-accent-2)]" />
                           </div>
-                        ) : secrets.length === 0 ? (
-                          <Card colorTheme={2} pattern="dots" className="py-20 text-center border-dashed border-8 flex flex-col items-center gap-6">
-                            <Key className="h-20 w-20 text-[var(--color-max-accent-1)]" />
-                            <h4 className="text-4xl font-black uppercase text-shadow-single">NO SECRETS HERE 🙈</h4>
-                            <Button colorTheme={3} onClick={() => setShowAddSecret(true)}>ADD ONE NOW!</Button>
+                        ) : sharedUsers.length === 0 ? (
+                          <Card colorTheme={3} pattern="dots" className="py-20 text-center border-dashed border-8 flex flex-col items-center gap-6">
+                            <Share2 className="h-20 w-20 text-[var(--color-max-accent-2)]" />
+                            <h4 className="text-4xl font-black uppercase text-shadow-single">NO ONE HAS ACCESS YET 😲</h4>
+                            <p className="text-xl font-bold text-white/80">Use the SHARE button above to grant read or write permissions to other smart accounts.</p>
                           </Card>
                         ) : (
                           <div className="flex flex-col gap-6">
-                            {secrets.map((secret, i) => {
+                            {sharedUsers.map((user, i) => {
                               const theme = getAccentColor(i);
-                              const isRevealed = revealedSecrets[secret.id];
-                              const decData = decryptedSecrets[secret.cid];
-
                               return (
-                                <Card key={secret.id} colorTheme={theme} asymmetric={i % 2 === 0 ? 'rotate-left' : 'rotate-right'} className="p-6 md:p-8 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+                                <Card key={user.address} colorTheme={theme} asymmetric={i % 2 === 0 ? 'rotate-left' : 'rotate-right'} className="p-6 md:p-8 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
                                   <div className="flex items-center gap-6">
                                     <div className="h-16 w-16 rounded-2xl bg-black/40 border-4 border-current flex items-center justify-center" style={{ color: `var(--color-max-accent-${theme})` }}>
-                                      <FileText className="h-8 w-8 text-white" />
+                                      <Shield className="h-8 w-8 text-white" />
                                     </div>
                                     <div>
-                                      <span className="text-lg font-bold text-white/70 uppercase tracking-widest">{secret.secretType}</span>
-                                      <h4 className="text-3xl font-black uppercase mt-1">
-                                        {decData ? decData.name : '••••••••••••'}
+                                      <span className="text-lg font-bold text-white/70 uppercase tracking-widest">
+                                        {user.level === 1 ? 'READ-ONLY ACCESS' : 'READ-WRITE ACCESS'}
+                                      </span>
+                                      <h4 className="text-2xl font-mono font-bold mt-1 break-all select-all">
+                                        {user.address}
                                       </h4>
                                     </div>
                                   </div>
 
-                                  {decData && (
-                                     <div className="flex-1 w-full md:w-auto md:mx-6 bg-black p-4 rounded-xl border-4 border-dashed border-white/40 flex items-center justify-between shadow-inner">
-                                       {secret.secretType === 'file' ? (
-                                         <>
-                                           <span className="text-xl font-mono text-[var(--color-max-accent-2)] font-bold break-all truncate max-w-xs">
-                                             {isRevealed ? "DECRYPTED FILE READY" : "••••••••••••••••"}
-                                           </span>
-                                           {isRevealed && (
-                                             <Button 
-                                               colorTheme={3} 
-                                               onClick={() => downloadDecryptedFile(decData.value, decData.name)}
-                                               className="h-10 py-1 px-4 text-xs ml-4 rounded-full shadow-[2px_2px_0_var(--color-max-accent-3)]"
-                                             >
-                                               DOWNLOAD 💾
-                                             </Button>
-                                           )}
-                                         </>
-                                       ) : (
-                                         <>
-                                           <span className="text-xl font-mono text-[var(--color-max-accent-2)] font-bold break-all">
-                                             {isRevealed ? decData.value : '••••••••••••••••'}
-                                           </span>
-                                           <button onClick={() => copyToClipboard(decData.value, secret.id)} className="ml-4 p-2 bg-white/10 hover:bg-white/20 rounded-lg transition">
-                                             {copiedText === secret.id ? <Check className="h-6 w-6 text-[var(--color-max-accent-3)]" /> : <Copy className="h-6 w-6 text-white" />}
-                                           </button>
-                                         </>
-                                       )}
-                                     </div>
-                                   )}
-
                                   <div className="flex gap-4 w-full md:w-auto">
-                                    <Button colorTheme={2} variant="outline" className="flex-1 md:w-auto px-4 py-2 h-14" onClick={() => handleDecryptSecret(secret.id, secret.cid, secret.encryptedName)}>
-                                      {isRevealed ? <EyeOff className="h-6 w-6" /> : <Eye className="h-6 w-6" />}
-                                    </Button>
-                                    <Button colorTheme={4} variant="primary" className="flex-1 md:w-auto px-4 py-2 h-14 !bg-rose-500 !border-rose-300" onClick={() => handleDeleteSecret(secret.id)}>
-                                      <Trash2 className="h-6 w-6" />
+                                    <Button 
+                                      colorTheme={4} 
+                                      variant="primary" 
+                                      className="flex-1 md:w-auto px-6 py-2 h-14 !bg-rose-500 !border-rose-300 shadow-[4px_4px_0_#991b1b] hover:shadow-[6px_6px_0_#991b1b]" 
+                                      onClick={() => handleRevokePermission(user.address)}
+                                    >
+                                      REVOKE ACCESS ❌
                                     </Button>
                                   </div>
                                 </Card>
